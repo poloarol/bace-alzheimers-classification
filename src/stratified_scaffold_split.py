@@ -1,4 +1,5 @@
 import argparse
+import os
 from collections import defaultdict
 
 import numpy as np
@@ -203,6 +204,8 @@ if __name__ == "__main__":
     train_idx, test_idx = stratified_scaffold_split(
         smiles, labels, test_size=args.test_size, n_trials=args.n_trials
     )
+    
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     np.savez(
         args.output,

@@ -1,10 +1,12 @@
 import argparse
+import os
 import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix, roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.base import clone
 
@@ -14,13 +16,25 @@ random.seed(seed)
 np.random.seed(seed)
 
 
-def create_estimator() -> RandomForestClassifier:
-    return RandomForestClassifier(
-        n_estimators=500,
-        class_weight="balanced",
-        random_state=seed,
-        n_jobs=-1
-    )
+def create_estimator(method: str = "random_forest"):
+    if method == "random_forest":
+        return RandomForestClassifier(
+            n_estimators=500,
+            class_weight="balanced",
+            random_state=seed,
+        )
+    elif method == "logistic_regression":
+        return LogisticRegression(
+            class_weight="balanced",
+            random_state=seed,
+            max_iter=1000,
+        )
+    elif method == "gradient_boosting":
+        return GradientBoostingClassifier(
+            random_state=seed
+        )
+    else:
+        raise ValueError(f"Unknown method: {method}")
 
 def train(estimator: RandomForestClassifier, X: np.ndarray, y: np.ndarray) -> RandomForestClassifier:
     clf = clone(estimator)
@@ -67,28 +81,28 @@ def save_confusion_matrix_as_image(y: np.ndarray, predictions: np.ndarray, filep
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate a RandomForestClassifier.")
-    parser.add_argument("--train-data", type=str, required=True, help="Path to the training data CSV file.")
-    parser.add_argument("--test-data", type=str, required=True, help="Path to the test data CSV file.")
-    parser.add_argument("--confusion-matrix-csv", type=str, help="Path to save the confusion matrix as CSV.")
-    parser.add_argument("--confusion-matrix-image", type=str, help="Path to save the confusion matrix as an image.")
+    parser.add_argument("--data", type=str, required=True, help="Path to the training data CSV file.")
+    parser.add_argument("--confusion-matrix-path", type=str, help="Path to save the confusion matrix as CSV and image.")
     args = parser.parse_args()
     
-    train_data = pd.read_csv(args.train_data)
-    test_data = pd.read_csv(args.test_data)
+    train_data = pd.read_csv(os.path.join(args.data, "train_fingerprints.csv"))
+    test_data = pd.read_csv(os.path.join(args.data, "test_fingerprints.csv"))
 
-    X_train = train_data.drop(columns=["Class"]).values
-    y_train = train_data["Class"].values
-    X_test = test_data.drop(columns=["Class"]).values
-    y_test = test_data["Class"].values
+    train_labels = pd.read_csv(os.path.join(args.data, "train_labels.csv"))
+    test_labels = pd.read_csv(os.path.join(args.data, "test_labels.csv"))
 
-    estimator = create_estimator()
-    clf = train(estimator, X_train, y_train)
-    evaluation_results = evaluate(clf, X_test, y_test)
-    print(evaluation_results)
+    estimators = [create_estimator(method="random_forest"),
+                  create_estimator(method="logistic_regression"),
+                  create_estimator(method="gradient_boosting")]
+    
+    for i, estimator in enumerate(estimators):
+        clf = train(estimator, train_data.values, train_labels.values.ravel())
+        evaluation_results = evaluate(clf, test_data.values, test_labels.values.ravel())
+        print(f"Evaluation results for estimator {estimator.__class__.__name__}: {evaluation_results}")
 
-    predictions = (clf.predict_proba(X_test)[:, 1] >= 0.5).astype(int)
+        predictions = (clf.predict_proba(test_data.values)[:, 1] >= 0.5).astype(int)
 
-    if args.confusion_matrix_csv:
-        save_confusion_matrix_as_csv(y_test, predictions, args.confusion_matrix_csv)
-    if args.confusion_matrix_image:
-        save_confusion_matrix_as_image(y_test, predictions, args.confusion_matrix_image)
+        if args.confusion_matrix_path:
+            os.makedirs(os.path.join(args.confusion_matrix_path, f"{estimator.__class__.__name__}"), exist_ok=True)
+            save_confusion_matrix_as_csv(test_labels.values.ravel(), predictions, os.path.join(args.confusion_matrix_path, f"{estimator.__class__.__name__}/confusion_matrix.csv"))
+            save_confusion_matrix_as_image(test_labels.values.ravel(), predictions, os.path.join(args.confusion_matrix_path, f"{estimator.__class__.__name__}/confusion_matrix.png"))
