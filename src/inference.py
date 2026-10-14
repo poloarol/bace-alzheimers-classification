@@ -96,7 +96,12 @@ def run_gnn_inference(
     with torch.inference_mode():
         for batch in DataLoader(dataset, batch_size=batch_size, shuffle=False):
             batch = batch.to(device)
-            output = model(batch.x, batch.edge_index, batch.batch)
+            output = model(
+                batch.x,
+                batch.edge_index,
+                batch.batch,
+                batch.edge_attr,
+            )
             predictions.extend(output.argmax(dim=1).cpu().tolist())
             labels.extend(batch.y.view(-1).cpu().tolist())
 
