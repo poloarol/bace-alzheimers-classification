@@ -7,6 +7,9 @@ import pandas as pd
 
 from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold
+import mlflow
+
+from mlflow_utils import configure_mlflow, log_parameters
 
 def stratified_scaffold_split(
     smiles,
@@ -195,21 +198,37 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, required=True, help="Path to save the split indices")
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of the dataset to include in the test split")
     parser.add_argument("--n_trials", type=int, default=100, help="Number of trials for finding the best split")
+    parser.add_argument("--mlflow-experiment", default="bace-preprocessing", help="MLflow experiment name.")
+    parser.add_argument("--mlflow-tracking-uri", help="MLflow tracking URI. Defaults to MLFLOW_TRACKING_URI or ./mlruns.")
     args = parser.parse_args()
+
+    configure_mlflow(args.mlflow_experiment, args.mlflow_tracking_uri)
     
     df = pd.read_csv(args.input)
     smiles = df["mol"].tolist()
     labels = df["Class"].values
 
-    train_idx, test_idx = stratified_scaffold_split(
-        smiles, labels, test_size=args.test_size, n_trials=args.n_trials
-    )
-    
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    with mlflow.start_run(run_name="stratified-scaffold-split"):
+        log_parameters({
+            "input_csv": args.input,
+            "output_file": args.output,
+            "test_size": args.test_size,
+            "n_trials": args.n_trials,
+            "samples": len(df),
+        })
+        train_idx, test_idx = stratified_scaffold_split(
+            smiles, labels, test_size=args.test_size, n_trials=args.n_trials
+        )
 
-    np.savez(
-        args.output,
-        train_idx=train_idx,
-        test_idx=test_idx
-    )
+        output_dir = os.path.dirname(args.output)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        np.savez(args.output, train_idx=train_idx, test_idx=test_idx)
+        mlflow.log_metrics({
+            "train_samples": len(train_idx),
+            "test_samples": len(test_idx),
+            "train_positive_rate": float(labels[train_idx].mean()),
+            "test_positive_rate": float(labels[test_idx].mean()),
+        })
+        mlflow.log_artifact(args.output)
     

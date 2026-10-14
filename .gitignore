@@ -78,6 +78,10 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+mlruns/
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
 
 # IPython
 profile_default/
@@ -219,4 +223,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-/data
+/data/
+/model/

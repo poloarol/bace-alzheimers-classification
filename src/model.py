@@ -9,6 +9,8 @@ from torch.nn import Linear
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn import global_mean_pool
 
+from dataset import MoleculeDataset
+
 seed: int = 42
 np.random.seed(seed)
 torch.manual_seed(seed)
@@ -44,6 +46,8 @@ if __name__ == "__main__":
     parser.add_argument("--hidden_channels", type=int, default=64, help="Number of hidden channels in the GCN")
     parser.add_argument("--dataset_path", type=str, default="data/", help="Path to the dataset")
     args = parser.parse_args()
+    
+    data = MoleculeDataset(root=args.dataset_path, file_name="bace.csv")
 
     model = GCN(hidden_channels=args.hidden_channels, data=data)
     print(model)

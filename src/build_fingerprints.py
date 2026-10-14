@@ -8,6 +8,9 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem import rdFingerprintGenerator
 
+import mlflow
+from mlflow_utils import configure_mlflow, log_parameters
+
 
 def build_morgan_fingerprint(smiles: str, 
                              radius: int = 2, 
@@ -29,8 +32,12 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", required=True, type=str, help="Path to the output directory where fingerprints will be saved.")
     parser.add_argument("--radius", type=int, default=2, help="Radius of the Morgan fingerprint.")
     parser.add_argument("--n_bits", type=int, default=2048, help="Number of bits in the Morgan fingerprint.")
+    parser.add_argument("--mlflow-experiment", default="bace-preprocessing", help="MLflow experiment name.")
+    parser.add_argument("--mlflow-tracking-uri", help="MLflow tracking URI. Defaults to MLFLOW_TRACKING_URI or ./mlruns.")
     
     args = parser.parse_args()
+
+    configure_mlflow(args.mlflow_experiment, args.mlflow_tracking_uri)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -48,12 +55,28 @@ if __name__ == "__main__":
     train_labels = df["Class"].iloc[train_idx].values
     test_labels = df["Class"].iloc[test_idx].values
 
-    # Save the fingerprints
-    pd.DataFrame(train_fp).to_csv(os.path.join(args.output_dir, "train_fingerprints.csv"), index=False)
-    pd.DataFrame(test_fp).to_csv(os.path.join(args.output_dir, "test_fingerprints.csv"), index=False)
-    
-    pd.DataFrame(train_labels).to_csv(os.path.join(args.output_dir, "train_labels.csv"), index=False)
-    pd.DataFrame(test_labels).to_csv(os.path.join(args.output_dir, "test_labels.csv"), index=False)
+    output_files = [
+        os.path.join(args.output_dir, "train_fingerprints.csv"),
+        os.path.join(args.output_dir, "test_fingerprints.csv"),
+        os.path.join(args.output_dir, "train_labels.csv"),
+        os.path.join(args.output_dir, "test_labels.csv"),
+    ]
+    with mlflow.start_run(run_name="build-morgan-fingerprints"):
+        log_parameters({
+            "input_csv": args.input_csv,
+            "split_file": args.train_test_split_npz,
+            "output_dir": args.output_dir,
+            "radius": args.radius,
+            "n_bits": args.n_bits,
+            "train_samples": len(train_fp),
+            "test_samples": len(test_fp),
+        })
+        for array, output_file in zip(
+            (train_fp, test_fp, train_labels, test_labels),
+            output_files,
+        ):
+            pd.DataFrame(array).to_csv(output_file, index=False)
+        mlflow.log_artifacts(args.output_dir, artifact_path="fingerprints")
 
 
 # Example usage:
