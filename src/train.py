@@ -1,12 +1,17 @@
 import argparse
+import copy
 import os
 import sys
 
 import torch
 from torch_geometric.loader import DataLoader
+from tqdm import trange
+
 
 from model import GCN
 from dataset import MoleculeDataset
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def train(model, train_loader):
@@ -20,14 +25,21 @@ def train(model, train_loader):
          optimizer.zero_grad()  # Clear gradients.
 
 def test(model, loader):
-     model.eval()
+    model.eval()
+    correct = 0
+    total = 0
 
-     correct = 0
-     for data in loader:  # Iterate in batches over the training/test dataset.
-         out = model(data.x, data.edge_index, data.batch)  
-         pred = out.argmax(dim=1)  # Use the class with highest probability.
-         correct += int((pred == data.y.view(-1)).sum())  # Check against ground-truth labels.
-     return correct / len(loader.dataset)  # Derive ratio of correct predictions.
+    with torch.inference_mode():
+        for data in loader:  # Iterate in batches over the training/test dataset.
+            data = data.to(device)
+
+            output = model(data.x, data.edge_index, data.batch)
+            pred = output.argmax(dim=1)
+
+            correct += (pred == data.y.view(-1)).sum().item()
+            total += data.y.size(0)
+
+    return correct / total if total else 0.0
 
 
 if __name__ == "__main__":
@@ -47,17 +59,52 @@ if __name__ == "__main__":
 
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+    train_loader = [(data.to(device)) for data in train_loader]
+    test_loader = [(data.to(device)) for data in test_loader]
     
     model = GCN(hidden_channels=args.hidden_channels, data=train_dataset)
+    model = model.to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     criterion = torch.nn.CrossEntropyLoss()
 
-    for epoch in range(1, args.epochs + 1):
+    patience = 20       # Stop after 10 epochs without improvement
+    eval_every = 5
+    best_val_acc = 0.0
+    epochs_without_improvement = 5
+    best_model_state = copy.deepcopy(model.state_dict())
+
+    progress = trange(1, args.epochs + 1, desc="Training")
+
+    for epoch in progress:
         train(model, train_loader)
-        train_acc = test(model, train_loader)
-        test_acc = test(model, test_loader)
-        print(f'Epoch: {epoch:03d}, Train Acc: {train_acc:.4f}, Test Acc: {test_acc:.4f}')
+
+        if epoch % eval_every == 0 or epoch == 1:
+            train_acc = test(model, train_loader)
+            test_acc = test(model, test_loader)
+
+            progress.set_postfix(
+                train_acc=f"{train_acc:.4f}",
+                test_acc=f"{test_acc:.4f}",
+                best_val_acc=f"{best_val_acc:.4f}",
+            )
+
+            if test_acc > best_val_acc:
+                best_val_acc = test_acc
+                best_model_state = copy.deepcopy(model.state_dict())
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += eval_every if epoch != 1 else 1
+
+            if epochs_without_improvement >= patience:
+                progress.write(
+                    f"Early stopping at epoch {epoch}. "
+                    f"Best test accuracy: {best_val_acc:.4f}"
+                )
+                break
+
+    model.load_state_dict(best_model_state)
         
 # Example usage:
 # python src/train.py --epochs 500 --hidden-channels 64 --dataset_path data/ --learning-rate 0.01
