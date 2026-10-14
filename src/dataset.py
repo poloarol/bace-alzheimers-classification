@@ -1,22 +1,16 @@
 import argparse
 import os
+from pathlib import Path
 
 import numpy as np
 import deepchem as dc
 import pandas as pd
 import torch
-import torch_geometric
 
 from rdkit import Chem
 from torch_geometric.data import Dataset
 from tqdm import tqdm
 
-
-print("Dataset module loaded successfully.")
-print("Torch version:", torch.__version__)
-print("Torch Geometric version:", torch_geometric.__version__)
-print("DeepChem version:", dc.__version__)
-print("CUDA available:", torch.cuda.is_available())
 
 class MoleculeDataset(Dataset):
     def __init__(self, root, filename, test=False, transform=None, pre_transform=None):
@@ -24,11 +18,10 @@ class MoleculeDataset(Dataset):
         self.test = test
 
         super().__init__(
-            root,
-            transform,
-            pre_transform
+            root=root,
+            transform=transform,
+            pre_transform=pre_transform,
         )
-        
 
     @property
     def raw_file_names(self):
@@ -53,23 +46,32 @@ class MoleculeDataset(Dataset):
             use_partial_charge=True
         )
 
-        os.makedirs(self.processed_dir, exist_ok=True)
-
         processed_index = 0
         skipped = 0
-        
-        split = np.load(os.path.join(self.root, "clean/train_test_split.npz"))
-        train_idx = split["train_idx"]
-        test_idx = split["test_idx"]
-        
-        if self.test:
-            df = df.loc[test_idx].reset_index(drop=True)
-        else:
-            df = df.loc[train_idx].reset_index(drop=True)
+
+        split_path = Path(self.root) / "clean" / "train_test_split.npz"
+        if not split_path.exists():
+            raise FileNotFoundError(
+                f"Train/test split file does not exist: {split_path}"
+            )
+
+        with np.load(split_path) as split:
+            split_indices = split["test_idx" if self.test else "train_idx"]
+
+        if np.any(split_indices < 0) or np.any(split_indices >= len(df)):
+            raise IndexError(
+                f"Split contains indices outside the CSV row range: {split_path}"
+            )
+
+        selected_rows = (
+            df.iloc[split_indices]
+            .assign(original_index=split_indices)
+            .reset_index(drop=True)
+        )
 
         for csv_index, row in tqdm(
-            df.iterrows(),
-            total=df.shape[0],
+            selected_rows.iterrows(),
+            total=selected_rows.shape[0],
             desc="Processing molecules"
         ):
 
@@ -94,15 +96,13 @@ class MoleculeDataset(Dataset):
                 data = features.to_pyg_graph()
 
                 # Label
-                data.y = self._get_label(
-                    row["Class"]
-                )
+                data.y = self._get_label(row["Class"])
 
                 # Store SMILES
                 data.smiles = smiles
 
                 # Store original CSV index for reference
-                data.original_index = csv_index
+                data.original_index = int(row["original_index"])
 
                 # IMPORTANT:
                 # Use a contiguous processed index.
@@ -133,17 +133,31 @@ class MoleculeDataset(Dataset):
 
                 raise
 
-    def len(self):
-        marker = ("test_complete.txt" if self.test else "train_complete.txt")
-        marker_path = os.path.join(self.processed_dir, marker)
+        marker_path = Path(self.processed_dir) / self.processed_file_names
+        marker_path.write_text(str(processed_index), encoding="utf-8")
 
-        if not os.path.exists(marker_path):
+    def len(self):
+        marker_path = Path(self.processed_dir) / self.processed_file_names
+
+        if not marker_path.exists():
             return 0
 
-        with open(marker_path, "r") as f:
-            return int(f.read().strip())
+        try:
+            length = int(marker_path.read_text(encoding="utf-8").strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid processed dataset marker: {marker_path}"
+            ) from exc
+
+        if length < 0:
+            raise ValueError(f"Processed dataset length cannot be negative: {marker_path}")
+
+        return length
 
     def get(self, idx):
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Dataset index out of range: {idx}")
+
         if self.test:
             filename = f"data_test_{idx}.pt"
         else:
@@ -159,10 +173,12 @@ class MoleculeDataset(Dataset):
                 f"Processed graph does not exist: {filepath}"
             )
 
-        return torch.load(
+        data = torch.load(
             filepath,
             weights_only=False
         )
+        data.y = data.y.reshape(-1)
+        return data
     
     @staticmethod
     def _get_label(label):
@@ -199,4 +215,7 @@ if __name__ == "__main__":
     )
     
     print("Number of molecules:", len(dataset))
-    
+
+
+## Example usage:
+# python src/dataset.py --root data/ --filename molecules.csv --test False

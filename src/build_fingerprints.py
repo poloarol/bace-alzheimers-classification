@@ -54,4 +54,7 @@ if __name__ == "__main__":
     
     pd.DataFrame(train_labels).to_csv(os.path.join(args.output_dir, "train_labels.csv"), index=False)
     pd.DataFrame(test_labels).to_csv(os.path.join(args.output_dir, "test_labels.csv"), index=False)
-    
+
+
+# Example usage:
+# python src/build_fingerprints.py --input_csv data/molecules.csv --train_test_split_npz data/split.npz --output_dir data/fingerprints --radius 2 --n_bits 2048

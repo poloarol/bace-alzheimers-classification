@@ -106,3 +106,6 @@ if __name__ == "__main__":
             os.makedirs(os.path.join(args.confusion_matrix_path, f"{estimator.__class__.__name__}"), exist_ok=True)
             save_confusion_matrix_as_csv(test_labels.values.ravel(), predictions, os.path.join(args.confusion_matrix_path, f"{estimator.__class__.__name__}/confusion_matrix.csv"))
             save_confusion_matrix_as_image(test_labels.values.ravel(), predictions, os.path.join(args.confusion_matrix_path, f"{estimator.__class__.__name__}/confusion_matrix.png"))
+
+# Example usage:
+# python src/baseline_model.py --data data/fingerprints --confusion-matrix-path data/confusion_matrices
