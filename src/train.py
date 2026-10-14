@@ -76,14 +76,14 @@ if __name__ == "__main__":
         help="Graph model architecture.",
     )
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
-    parser.add_argument("--hidden-channels", type=int, default=64, help="Number of hidden channels in the GCN model.")
+    parser.add_argument("--hidden-channels", type=int, default=64, help="Number of hidden channels in the graph model.")
     parser.add_argument("--dataset_path", type=str, default="data/", help="Path to the dataset directory.")
     parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate for the optimizer.")
     parser.add_argument("--batch-size", type=int, default=32, help="Number of graphs per batch.")
     parser.add_argument(
         "--model-output",
-        default="model/graph_conv_model.pth",
-        help="Path for the local model state-dict checkpoint.",
+        default=None,
+        help="Optional path for the local model state-dict checkpoint.",
     )
     parser.add_argument("--mlflow-experiment", default="bace-gnn", help="MLflow experiment name.")
     parser.add_argument("--mlflow-tracking-uri", help="MLflow tracking URI. Defaults to MLFLOW_TRACKING_URI or ./mlruns.")
@@ -119,6 +119,7 @@ if __name__ == "__main__":
         data=train_dataset,
     )
     model = model.to(device)
+    model_class_name = model.__class__.__name__
     
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     criterion = torch.nn.CrossEntropyLoss()
@@ -179,7 +180,9 @@ if __name__ == "__main__":
     )
     mlflow.end_run()
     
-    model_output = os.path.abspath(args.model_output)
+    model_output = os.path.abspath(
+        args.model_output or os.path.join("model", f"{model_class_name}.pth")
+    )
     os.makedirs(os.path.dirname(model_output), exist_ok=True)
     torch.save(model.state_dict(), model_output)
         

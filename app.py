@@ -359,7 +359,9 @@ if __name__ == "__main__":
 # python app.py split
 # python app.py fingerprints
 # python app.py baseline
-# python app.py gnn --epochs 100
+# python app.py gnn --model GCN --epochs 100
+# python app.py gnn --model GAT --epochs 100
+# python app.py gnn --model GATGraphTransformer --epochs 100
 
 # Run test inference from a tracked MLflow model
 # python app.py inference `

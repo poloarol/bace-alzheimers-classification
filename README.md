@@ -85,7 +85,7 @@ The default experiments are:
 |---|---|
 | `bace-preprocessing` | Scaffold splits and Morgan fingerprints |
 | `bace-baseline` | Random Forest, Logistic Regression, and Gradient Boosting |
-| `bace-gnn` | GCN training, epoch metrics, and the logged model |
+| `bace-gnn` | GCN, GAT, and GATGraphTransformer training, metrics, and logged models |
 
 ## Results
 
@@ -100,8 +100,10 @@ best restored checkpoint:
 | Inhibitor F1 | 0.8242074927953891 |
 
 The same metrics are logged to MLflow using the exact metric names above.
-Training also logs accuracy by epoch and saves the PyTorch model under the
-`GCN-Model` artifact path.
+Training also logs accuracy by epoch and saves each PyTorch model under its
+model-specific artifact path (`GCN-Model`, `GAT-Model`, or
+`GATGraphTransformer-Model`). Local state-dict checkpoints default to
+`model\GCN.pth`, `model\GAT.pth`, and `model\GATGraphTransformer.pth`.
 
 Baseline evaluation logs ROC-AUC, PR-AUC, balanced accuracy, and inhibitor F1
 for each estimator. Baseline confusion matrices are written under
@@ -175,13 +177,13 @@ python app.py inference `
   --model-type RandomForestClassifier
 ```
 
-For the GNN:
+For a GNN:
 
 ```powershell
 python app.py inference `
-  --model-uri "runs:/<run-id>/GCN-Model" `
+  --model-uri "runs:/<run-id>/GAT-Model" `
   --model-flavor pytorch `
-  --model-type GCN
+  --model-type GAT
 ```
 
 Inference loads the held-out test set and writes:
@@ -196,10 +198,10 @@ with class order `0, 1`.
 
 ## Run the complete pipeline
 
-Run split creation, fingerprint generation, baseline training, and GNN
-training in order:
+Run split creation, fingerprint generation, baseline training, and one selected
+GNN architecture in order:
 
-```powershell
+```
 python app.py all
 ```
 
@@ -217,6 +219,14 @@ python app.py all `
   --hidden-channels 64 `
   --learning-rate 0.01 `
   --batch-size 32
+```
+
+The `--model` option selects the GNN architecture for the `all` command:
+
+```powershell
+python app.py all --model GCN
+python app.py all --model GAT
+python app.py all --model GATGraphTransformer
 ```
 
 Use `--skip-gnn` to run only preprocessing and baseline training. Use

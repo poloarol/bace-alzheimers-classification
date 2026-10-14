@@ -126,7 +126,7 @@ def build_model(model_type: str, hidden_channels: int, data):
     return model_class(hidden_channels=hidden_channels, data=data)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("GCN model for graph classification")
+    parser = argparse.ArgumentParser("Graph model for graph classification")
     parser.add_argument("--hidden_channels", type=int, default=64, help="Number of hidden channels in the GCN")
     parser.add_argument("--dataset_path", type=str, default="data/", help="Path to the dataset")
     args = parser.parse_args()
