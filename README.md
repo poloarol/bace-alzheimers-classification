@@ -1,4 +1,4 @@
-# BACE Alzheimer's Classification
+# BACE-1 Molecular Activity Classification.
 
 Classification of small molecules to determine whether they inhibit
 beta-secretase 1 (BACE1).
