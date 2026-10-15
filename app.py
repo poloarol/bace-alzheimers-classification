@@ -281,6 +281,7 @@ class PipelineRunner:
             arguments.extend(["--checkpoint", checkpoint])
         if temperature_output:
             arguments.extend(["--temperature-output", temperature_output])
+        arguments.extend(self._tracking_arguments("bace-calibration"))
         self._run("calibration.py", arguments)
 
     def _checkpoint_for(self, model_type: str | None) -> str | None:

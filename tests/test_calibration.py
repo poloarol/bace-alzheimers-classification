@@ -206,5 +206,68 @@ class CalibrationArtifactTests(unittest.TestCase):
             self.assertEqual(class_counts(labels), {"n": 2, "class_0": 1, "class_1": 1})
 
 
+class CalibrationCliTests(unittest.TestCase):
+    def test_cli_writes_artifact_and_report(self):
+        import json
+        import subprocess
+
+        generator = np.random.default_rng(0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("val", "test"):
+                labels = generator.integers(0, 2, 80)
+                logits = np.stack([-(labels * 2 - 1) * 3.0, (labels * 2 - 1) * 3.0], axis=1)
+                logits = logits + generator.normal(0, 3, logits.shape)
+                with open(root / f"{name}.csv", "w", newline="") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(["label", "logit_0", "logit_1"])
+                    writer.writerows(zip(labels, logits[:, 0], logits[:, 1]))
+            script = Path(__file__).resolve().parents[1] / "src" / "calibration.py"
+            subprocess.run(
+                [sys.executable, str(script), "--validation", str(root / "val.csv"),
+                 "--test", str(root / "test.csv"), "--output-dir", str(root / "out"),
+                 "--temperature-output", str(root / "m" / "GCN.calibration.json"),
+                 "--model-name", "GCN", "--checkpoint", "GCN.pth", "--bins", "5"],
+                check=True, capture_output=True,
+            )
+            report = json.loads((root / "out" / "calibration_report.json").read_text())
+            self.assertEqual(report["binning"]["n_bins"], 5)
+            self.assertEqual(report["test_counts"]["n"], 80)
+            self.assertIn("ECE", report["metrics"]["calibrated"])
+            self.assertTrue((root / "out" / "reliability_diagram.png").is_file())
+            self.assertGreater(load_temperature(root / "m" / "GCN.calibration.json", "GCN"), 0)
+            bad = subprocess.run(
+                [sys.executable, str(script), "--validation", str(root / "val.csv"),
+                 "--test", str(root / "test.csv"), "--bins", "0"],
+                capture_output=True,
+            )
+            self.assertNotEqual(bad.returncode, 0)
+
+    def test_scaling_keeps_argmax_and_known_temperature(self):
+        logits = torch.tensor([[0.0, 2.0], [1.0, -1.0], [0.3, 0.1]])
+        for temperature in (0.5, 1.0, 4.0):
+            scaled = apply_temperature(logits, temperature)
+            self.assertEqual((scaled >= 0.5).astype(int).tolist(), logits.argmax(dim=1).tolist())
+        expected = torch.softmax(logits / 2.0, dim=1)[:, 1].numpy()
+        np.testing.assert_allclose(apply_temperature(logits, 2.0), expected, rtol=1e-6)
+    def test_calibrated_inference_output(self):
+        from inference import save_calibrated_predictions
+
+        logits = torch.tensor([[0.0, 2.0], [1.0, -1.0], [0.3, 0.1]])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            save_temperature(2.0, root / "GCN.calibration.json", model="GCN")
+            path = save_calibrated_predictions(
+                logits, np.array([1, 0, 1]), str(root / "GCN.calibration.json"), "GCN", root
+            )
+            rows = list(csv.DictReader(open(path)))
+            expected = torch.softmax(logits / 2.0, dim=1)[:, 1].numpy()
+            np.testing.assert_allclose([float(r["calibrated_probability"]) for r in rows], expected, rtol=1e-6)
+            with self.assertRaises(ValueError):
+                save_calibrated_predictions(
+                    logits, np.array([1, 0, 1]), str(root / "GCN.calibration.json"), "GAT", root
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

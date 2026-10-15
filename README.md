@@ -2,7 +2,7 @@
 
 A molecular machine learning project comparing classical machine learning and graph neural networks for predicting whether a small molecule inhibits beta-secretase 1 (BACE-1).
 
-The project combines molecular graph learning, cheminformatics, scaffold-aware evaluation, experiment tracking, and reproducible workflow automation. The next development phase will focus on explainability, probability calibration, and uncertainty-aware predictions.
+The project combines molecular graph learning, cheminformatics, scaffold-aware evaluation, experiment tracking, and reproducible workflow automation. Temperature-scaling calibration is implemented; the next development phase will focus on explainability and uncertainty-aware predictions.
 
 - BACE molecule graph processing with DeepChem and PyTorch Geometric.
 - Scaffold-aware, stratified train/validation/calibration/test splitting.
@@ -100,9 +100,7 @@ The existing GNN training workflow reports the following held-out metrics:
 
 These results provide an initial performance baseline for the graph learning pipeline.
 
-**Important evaluation caveat:** In the current training implementation, test accuracy is evaluated during training and used for checkpoint selection. Consequently, the reported metrics should be considered preliminary rather than an unbiased final estimate of generalization performance.
-
-A revised experimental protocol is planned before drawing stronger conclusions about model performance.
+**Evaluation caveat:** The table above was produced by an earlier training implementation in which test accuracy influenced checkpoint selection, so these numbers are preliminary and optimistic. The current code selects checkpoints on the validation split only and uses the test split for final evaluation; re-run the pipeline to regenerate the results.
 
 The classical baselines are also implemented and evaluated by the pipeline. A consolidated comparison of the baseline models and all GNN architectures, using a consistent and independently evaluated split, remains a next step.
 
@@ -116,6 +114,8 @@ bace-alzheimers-classification/
 ├── Snakefile
 ├── README.md
 ├── notebooks/
+├── model/                       # checkpoints and <Model>.calibration.json
+├── tests/
 └── src/
     ├── dataset.py
     ├── model.py
@@ -138,8 +138,8 @@ bace-alzheimers-classification/
 | `baseline_model.py` | Classical fingerprint-based classifiers. |
 | `build_fingerprints.py` | Morgan fingerprint generation. |
 | `stratified_scaffold_split.py` | Scaffold-aware dataset splitting. |
-| `inference.py` | Model inference and confusion-matrix generation. |
-| `calibration.py` | Temperature scaling, Brier/NLL/ECE metrics, and reliability diagrams. |
+| `inference.py` | Model inference, confusion matrices, and optional calibrated probabilities. |
+| `calibration.py` | Temperature fitting, Brier/NLL/ECE metrics, reliability diagrams, and the calibration JSON/report CLI. |
 | `mlflow_utils.py` | Shared MLflow configuration. |
 | `app.py` | Command-line pipeline runner. |
 | `Snakefile` | Workflow automation. |
@@ -344,9 +344,12 @@ data/MoleculeNet/bace/output/predictions/selected_baseline.json                 
 model/<ModelName>.calibration.json                                                # canonical artifact: T, model, checkpoint, class convention, counts, before/after metrics
 data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_diagram.png
 data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_table.csv
+data/MoleculeNet/bace/output/calibration/<ModelName>/calibration_report.json     # machine-readable before/after metrics, counts, binning
 ```
 
-The JSON has a `schema_version`, records `positive_class` (class 1 = BACE-1 inhibitor), and loading it with `expected_model` refuses a temperature fitted for a different model. MLflow no longer receives calibration metrics; the JSON is the record.
+Calibration runs also log to the MLflow experiment `bace-calibration` (run tagged with `model`; metrics `temperature` and `test_{uncalibrated,calibrated}_{brier,nll,ece}`; artifacts under `calibration/`). Training runs no longer carry calibration metrics. Snakemake declares the calibration JSON, diagram, table and report as outputs of `calibrate_gnn`.
+
+The JSON has a `schema_version`, records `positive_class` (class 1 = BACE-1 inhibitor), and loading it with `expected_model` refuses a temperature fitted for a different model. MLflow no longer receives calibration metrics from training; the calibration stage logs them itself (below).
 
 To recalibrate (for example with a different bin count) without retraining:
 
@@ -452,7 +455,9 @@ python -m unittest discover -s tests -v
 The suite covers split-file keys, index coverage, class representation,
 scaffold isolation, graph-cache invalidation, fingerprint generation, baseline
 models, GNN model construction and forward passes, inference outputs, MLflow
-utilities, CLI parsing, and train/validation model selection behavior.
+utilities, CLI parsing, train/validation model selection behavior, and
+calibration (temperature fitting, input validation, metrics, artifact
+round trips). `pytest` is not required; the suite uses `unittest`.
 
 Other supported architectures include `GCN` and `GATGraphTransformer`.
 
@@ -504,7 +509,7 @@ Tracking settings can be configured using `MLFLOW_TRACKING_URI` or the supported
 
 Several limitations should be addressed before treating the current results as a reliable estimate of prospective molecular activity prediction.
 
-**Evaluation leakage through checkpoint selection.** The current training workflow uses test accuracy during training to select a checkpoint. This allows the test set to influence model selection and can make the reported metrics optimistic.
+**Validation reuse.** Checkpoints are selected on the validation split, which is also used to fit the calibration temperature, so the temperature is not fitted on fully independent data. The test split is used only for final evaluation. Reported results in this README predate that fix and should be regenerated.
 
 **Limited dataset size.** With approximately 1,530 molecules, model performance estimates and calibration metrics may be sensitive to the composition of the data partitions.
 
@@ -535,7 +540,7 @@ The target counts are approximate; scaffold grouping and class balance may affec
 
 The implementation should:
 
-- Remove test-set metrics from checkpoint selection.
+- Keep test-set metrics out of checkpoint selection (done).
 - Use validation data for early stopping and model selection.
 - Keep calibration data separate from model fitting and selection.
 - Evaluate the frozen pipeline on the test set only after the modeling and calibration decisions are finalized.
@@ -543,16 +548,7 @@ The implementation should:
 
 ### 2. Probability calibration
 
-Investigate temperature scaling and evaluate whether predicted probabilities agree with observed activity frequencies.
-
-Planned metrics include:
-
-- Brier score
-- Negative log-likelihood
-- Expected calibration error (ECE)
-- Reliability diagrams
-
-Calibration quality should be evaluated on held-out test data after the calibration method has been fitted.
+**Status: implemented** (see [Probability calibration](#probability-calibration)). Temperature scaling is fitted on validation logits and evaluated on the test split with Brier score, NLL, ECE and reliability diagrams (with per-bin counts). Still planned: uncertainty intervals for these metrics (ordinary bootstrap ignores scaffold-level dependence) and an independent temperature-fitting set.
 
 ### 3. Conformal prediction
 

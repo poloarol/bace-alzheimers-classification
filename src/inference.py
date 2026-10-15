@@ -140,8 +140,8 @@ def save_calibrated_predictions(
     """
     temperature = load_temperature(calibration_file, expected_model=model_type)
     logits = torch.as_tensor(logits, dtype=torch.float64)
-    uncalibrated = apply_temperature(logits, 1.0)[:, 1]
-    calibrated = apply_temperature(logits, temperature)[:, 1]
+    uncalibrated = apply_temperature(logits, 1.0)
+    calibrated = apply_temperature(logits, temperature)
     path = output_directory / "calibrated_predictions.csv"
     pd.DataFrame({
         "label": labels,

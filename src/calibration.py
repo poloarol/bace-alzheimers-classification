@@ -455,6 +455,8 @@ def main() -> None:
     parser.add_argument("--model-name", help="Model the predictions came from; stored in the JSON.")
     parser.add_argument("--checkpoint", help="Checkpoint or run identifier; stored in the JSON.")
     parser.add_argument("--bins", type=_positive_int, default=DEFAULT_BINS, help="Number of ECE/reliability bins.")
+    parser.add_argument("--mlflow-experiment", help="If set, log metrics (test_<kind>_<metric>) and artifacts to this MLflow experiment.")
+    parser.add_argument("--mlflow-tracking-uri", help="MLflow tracking URI (defaults to the repository setting).")
     args = parser.parse_args()
 
     validation_logits, validation_labels = _read_predictions(args.validation)
@@ -488,7 +490,44 @@ def main() -> None:
     print(f"Temperature: {result['temperature']:.4f}")
     for kind in ("uncalibrated", "calibrated"):
         print(f"{kind}: {result[kind]}")
+
+    report_path = Path(args.output_dir) / "calibration_report.json"
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "model": args.model_name,
+        "checkpoint": args.checkpoint,
+        "positive_class": POSITIVE_CLASS_NOTE,
+        "temperature": result["temperature"],
+        "fitted_on": "validation",
+        "evaluated_on": "test",
+        "validation_counts": validation_counts,
+        "test_counts": test_counts,
+        "binning": {"n_bins": args.bins, "scheme": "fixed-width on [0, 1] for P(class 1)"},
+        "brier_convention": "binary positive-class: mean((p - y)^2)",
+        "metrics": {"uncalibrated": result["uncalibrated"], "calibrated": result["calibrated"]},
+    }
+    report_path.write_text(json.dumps(report, indent=2, default=_json_default), encoding="utf-8")
+
+    if args.mlflow_experiment:
+        import mlflow
+
+        from mlflow_utils import configure_mlflow
+
+        configure_mlflow(args.mlflow_experiment, args.mlflow_tracking_uri)
+        with mlflow.start_run(run_name=f"calibration-{args.model_name or 'custom'}"):
+            mlflow.set_tags({"stage": "calibration", "model": args.model_name or "custom"})
+            mlflow.log_params({"checkpoint": args.checkpoint or "", "n_bins": args.bins})
+            mlflow.log_metric("temperature", result["temperature"])
+            mlflow.log_metrics({
+                f"test_{kind}_{metric.lower()}": value
+                for kind in ("uncalibrated", "calibrated")
+                for metric, value in result[kind].items()
+            })
+            mlflow.log_artifacts(args.output_dir, artifact_path="calibration")
+            mlflow.log_artifact(temperature_path, artifact_path="calibration")
+
     print(f"Saved calibration artifact to: {temperature_path}")
+    print(f"Saved calibration report to: {report_path}")
     print(f"Saved reliability diagram to: {Path(args.output_dir) / 'reliability_diagram.png'}")
     print(f"Saved per-bin table to: {Path(args.output_dir) / 'reliability_table.csv'}")
 

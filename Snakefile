@@ -32,6 +32,7 @@ rule all:
         SELECTED_BASELINE,
         expand(os.path.join(MODEL_DIR, "{model}.pth"), model=config["gnn_models"]),
         expand(CALIBRATION_JSON, model=config["gnn_models"]),
+        expand(os.path.join(CALIBRATION_DIR, "calibration_report.json"), model=config["gnn_models"]),
 
 
 rule split:
@@ -106,11 +107,15 @@ rule calibrate_gnn:
         validation=os.path.join(PREDICTIONS_DIR, "{model}", "validation_predictions.csv"),
         test=os.path.join(PREDICTIONS_DIR, "{model}", "test_predictions.csv")
     output:
-        CALIBRATION_JSON
+        CALIBRATION_JSON,
+        os.path.join(CALIBRATION_DIR, "reliability_diagram.png"),
+        os.path.join(CALIBRATION_DIR, "reliability_table.csv"),
+        os.path.join(CALIBRATION_DIR, "calibration_report.json")
     params:
         output_dir=CALIBRATION_DIR
     shell:
         "{PYTHON} " + SCRIPT("calibration.py") + " "
         "--validation {input.validation} --test {input.test} "
         "--model-name {wildcards.model} --checkpoint {input.checkpoint} "
-        "--output-dir {params.output_dir} --temperature-output {output}"
+        "--output-dir {params.output_dir} --temperature-output {output[0]} "
+        "--mlflow-experiment bace-calibration"
