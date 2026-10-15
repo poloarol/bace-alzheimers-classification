@@ -190,8 +190,8 @@ checkpoint with the best validation accuracy:
 | Inhibitor F1 | 0.8242074927953891 |
 
 The same metrics are logged to MLflow using the exact metric names above.
-Training also logs validation and calibration metrics by epoch, then evaluates
-the restored checkpoint on the test split. Each PyTorch model is saved under
+Training logs train and validation metrics by epoch and does not score the
+calibration or test splits. Each PyTorch model is saved under
 its model-specific artifact path (`GCN-Model`, `GAT-Model`, or
 `GATGraphTransformer-Model`). Local state-dict checkpoints default to
 `model\GCN.pth`, `model\GAT.pth`, and `model\GATGraphTransformer.pth`.
@@ -316,9 +316,10 @@ The existing `gnn --model <name>` form remains supported for legacy usage.
 Each GNN run loads the named `train`, `validation`, `calibration`, and `test`
 graph splits from the split archive. Missing processed graph files are created
 automatically under `data/MoleculeNet/bace/processed/`. The validation split
-controls checkpoint selection and early stopping; calibration and test splits
-are evaluation-only. The GNN command logs epoch-level metrics and the final
-calibration and test metrics to MLflow after model selection. Processed graph
+controls checkpoint selection and early stopping. The GNN command logs
+epoch-level train and validation metrics and does not score the calibration or
+test splits; it only writes their raw logits, and final test results come from
+the calibration stage. Processed graph
 cache names include a hash of the split archive, so changing the split causes
 the affected datasets to be rebuilt automatically.
 Use `--hidden-channels` and `--learning-rate` to change model settings.

@@ -18,7 +18,6 @@ from stratified_scaffold_split import (
 )
 from app import GNN_MODELS, PipelinePaths, PipelineRunner
 from train import (
-    evaluate_after_model_selection,
     evaluate_for_model_selection,
 )
 
@@ -214,23 +213,10 @@ class SplitTrainingWorkflowTests(unittest.TestCase):
             ("model", "validation_loader"),
         )
 
-    def test_calibration_and_test_evaluation_is_deferred(self):
-        with patch("train.evaluate", side_effect=["calibration", "test"]) as evaluate:
-            result = evaluate_after_model_selection(
-                "model",
-                "calibration_loader",
-                "test_loader",
-            )
+    def test_training_has_no_post_selection_split_evaluation(self):
+        import train
 
-        self.assertEqual(result, ("calibration", "test"))
-        self.assertEqual(
-            evaluate.call_args_list[0].args,
-            ("model", "calibration_loader"),
-        )
-        self.assertEqual(
-            evaluate.call_args_list[1].args,
-            ("model", "test_loader"),
-        )
+        self.assertFalse(hasattr(train, "evaluate_after_model_selection"))
 
 
 if __name__ == "__main__":

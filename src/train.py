@@ -80,13 +80,6 @@ def evaluate_for_model_selection(model, train_loader, validation_loader):
     )
 
 
-def evaluate_after_model_selection(model, calibration_loader, test_loader):
-    return (
-        evaluate(model, calibration_loader),
-        evaluate(model, test_loader),
-    )
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate a graph model.")
     parser.add_argument(
@@ -155,12 +148,10 @@ if __name__ == "__main__":
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False)
-    calibration_loader = DataLoader(calibration_dataset, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     train_loader = [(data.to(device)) for data in train_loader]
     validation_loader = [(data.to(device)) for data in validation_loader]
-    calibration_loader = [(data.to(device)) for data in calibration_loader]
     test_loader = [(data.to(device)) for data in test_loader]
     
     model = build_model(
@@ -233,23 +224,8 @@ if __name__ == "__main__":
 
     model.load_state_dict(best_model_state)
     mlflow.log_metric("best_validation_accuracy", best_val_acc)
-    final_calibration_metrics, final_test_metrics = (
-        evaluate_after_model_selection(
-            model,
-            calibration_loader,
-            test_loader,
-        )
-    )
-    mlflow.log_metrics({
-        f"calibration_{metric}": value
-        for metric, value in final_calibration_metrics.items()
-    })
-    mlflow.log_metrics(final_test_metrics)
-    print(f"Final calibration metrics: {final_calibration_metrics}")
-    print(f"Final test metrics: {final_test_metrics}")
-
-    # Calibration is a separate downstream stage (src/calibration.py); training only
-    # writes the labelled raw logits it consumes.
+    # The calibration and test splits are not scored here. Training only writes the
+    # labelled raw logits; final test results come from the downstream calibration stage.
     validation_labels, validation_logits = collect_predictions(model, validation_loader)
     test_labels, test_logits = collect_predictions(model, test_loader)
     predictions_dir = args.predictions_dir or os.path.join(args.dataset_path, "output", "predictions")
