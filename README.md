@@ -271,3 +271,22 @@ Baseline confusion matrices are written under
 `data/MoleculeNet/bace/output/`. Snakemake does not infer an MLflow model URI
 for the subsequent inference step; after selecting a run in MLflow, use the
 individual `inference` command documented above.
+
+## Next Steps:
+
+01. Correct Experimental Protocol:
+   Introduce training, validation, calibration, and test roles. Stop selecting checkpoints based on test accuracy. Save fixed split indices and establish a reproducible baseline.
+
+02. Calibrate the baseline test:
+   Implement temperature scaling, Brier score, negative log-likelihood, ECE, and reliability diagrams. This creates the foundation for trustworthy probabilities.
+
+03. Add conformal preditions:
+   Implement split conformal classification and evaluate coverage, set size, singleton rate, and coverage across scaffold novelty.
+
+04. Add ensemble uncertainty:
+   Train multiple seeds and quantify predictive uncertainty, model disagreement, and molecular novelty. Test whether these measures identify errors and unreliable predictions.
+
+05. Add molecular explanation:
+   Generate GNNExplainer and atom-level attribution visualizations. Evaluate fidelity and stability rather than relying on visual appeal alone.
+
+
