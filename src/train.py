@@ -67,6 +67,20 @@ def evaluate(model, loader):
     return classification_metrics(labels, scores, predictions)
 
 
+def evaluate_for_model_selection(model, train_loader, validation_loader):
+    return (
+        evaluate(model, train_loader),
+        evaluate(model, validation_loader),
+    )
+
+
+def evaluate_after_model_selection(model, calibration_loader, test_loader):
+    return (
+        evaluate(model, calibration_loader),
+        evaluate(model, test_loader),
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate a graph model.")
     parser.add_argument(
@@ -160,8 +174,11 @@ if __name__ == "__main__":
         train(model, train_loader)
 
         if epoch % eval_every == 0 or epoch == 1:
-            train_metrics = evaluate(model, train_loader)
-            validation_metrics = evaluate(model, validation_loader)
+            train_metrics, validation_metrics = evaluate_for_model_selection(
+                model,
+                train_loader,
+                validation_loader,
+            )
 
             mlflow.log_metrics(
                 {
@@ -201,8 +218,13 @@ if __name__ == "__main__":
 
     model.load_state_dict(best_model_state)
     mlflow.log_metric("best_validation_accuracy", best_val_acc)
-    final_calibration_metrics = evaluate(model, calibration_loader)
-    final_test_metrics = evaluate(model, test_loader)
+    final_calibration_metrics, final_test_metrics = (
+        evaluate_after_model_selection(
+            model,
+            calibration_loader,
+            test_loader,
+        )
+    )
     mlflow.log_metrics({
         f"calibration_{metric}": value
         for metric, value in final_calibration_metrics.items()

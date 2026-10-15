@@ -393,17 +393,18 @@ python app.py all --model GCN
 python app.py all --model GAT
 ```
 
-## Workflow tests
+## Test suite
 
-Run the focused split-to-training workflow tests with:
+Run the complete unit and workflow test suite with:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-These tests cover split-file keys, index coverage, class representation,
-scaffold isolation, and graph-cache invalidation when the split archive
-changes.
+The suite covers split-file keys, index coverage, class representation,
+scaffold isolation, graph-cache invalidation, fingerprint generation, baseline
+models, GNN model construction and forward passes, inference outputs, MLflow
+utilities, CLI parsing, and train/validation model selection behavior.
 
 Other supported architectures include `GCN` and `GATGraphTransformer`.
 
