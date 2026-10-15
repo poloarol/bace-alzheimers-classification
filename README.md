@@ -3,6 +3,10 @@
 Classification of small molecules to determine whether they inhibit
 beta-secretase 1 (BACE1).
 
+## Question
+
+Can we identify when a GNN's molecular activity prediction is reliable, quantify the uncertainty of that prediction, and explain which molecular substructures contributed to it?
+
 ## What was implemented
 
 - BACE molecule graph processing with DeepChem and PyTorch Geometric.
