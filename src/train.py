@@ -44,27 +44,31 @@ def classification_metrics(labels, scores, predictions):
     }
 
 
-def evaluate(model, loader):
+def collect_predictions(model, loader):
+    """Return labels and raw (pre-softmax) logits, e.g. for temperature scaling."""
     model.eval()
     labels = []
-    scores = []
-    predictions = []
+    logits = []
 
     with torch.inference_mode():
-        for data in loader:  # Iterate in batches over the training/test dataset.
+        for data in loader:
             data = data.to(device)
-
             output = model(data.x, data.edge_index, data.batch, data.edge_attr)
-            pred = output.argmax(dim=1)
-
-            labels.extend(data.y.view(-1).cpu().tolist())
-            scores.extend(torch.softmax(output, dim=1)[:, 1].cpu().tolist())
-            predictions.extend(pred.cpu().tolist())
+            labels.append(data.y.view(-1).cpu())
+            logits.append(output.cpu())
 
     if not labels:
         raise ValueError("Cannot evaluate an empty data loader.")
 
-    return classification_metrics(labels, scores, predictions)
+    return torch.cat(labels), torch.cat(logits)
+
+
+def evaluate(model, loader):
+    labels, logits = collect_predictions(model, loader)
+    scores = torch.softmax(logits, dim=1)[:, 1].tolist()
+    predictions = logits.argmax(dim=1).tolist()
+
+    return classification_metrics(labels.tolist(), scores, predictions)
 
 
 def evaluate_for_model_selection(model, train_loader, validation_loader):

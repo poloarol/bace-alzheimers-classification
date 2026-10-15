@@ -107,6 +107,7 @@ if __name__ == "__main__":
                   create_estimator(method="logistic_regression"),
                   create_estimator(method="gradient_boosting")]
     
+    fitted_models = {}
     for i, estimator in enumerate(estimators):
         model_name = estimator.__class__.__name__
         with mlflow.start_run(run_name=model_name):
@@ -120,40 +121,50 @@ if __name__ == "__main__":
                 **estimator.get_params(),
             })
             clf = train(estimator, train_data.values, train_labels.values.ravel())
-            split_data = {
-                "validation": (validation_data, validation_labels),
-                "calibration": (calibration_data, calibration_labels),
-                "test": (test_data, test_labels),
-            }
-            evaluation_results = {}
-            for split_name, (features, split_labels) in split_data.items():
-                split_metrics = evaluate(
+            # Model selection uses validation only; test is evaluated after selection.
+            evaluation_results = {
+                f"validation_{metric}": value
+                for metric, value in evaluate(
                     clf,
-                    features.values,
-                    split_labels.values.ravel(),
-                )
-                evaluation_results.update({
-                    f"{split_name}_{metric}": value
-                    for metric, value in split_metrics.items()
-                })
+                    validation_data.values,
+                    validation_labels.values.ravel(),
+                ).items()
+            }
             mlflow.log_metrics(evaluation_results)
+            fitted_models[model_name] = (clf, evaluation_results["validation_PR-AUC"], mlflow.active_run().info.run_id)
             mlflow.sklearn.log_model(
                 sk_model=clf,
                 name=model_name,
                 skops_trusted_types=["sklearn.tree._tree.Tree"],
             )
-            print(f"Evaluation results for {model_name}: {evaluation_results}")
+            print(f"Validation results for {model_name}: {evaluation_results}")
 
-            predictions = (clf.predict_proba(test_data.values)[:, 1] >= 0.5).astype(int)
+    best_name, (best_clf, _, best_run_id) = max(fitted_models.items(), key=lambda item: item[1][1])
+    print(f"Selected model (by validation PR-AUC): {best_name}")
 
-            if args.confusion_matrix_path:
-                output_dir = os.path.join(args.confusion_matrix_path, model_name)
-                os.makedirs(output_dir, exist_ok=True)
-                confusion_csv = os.path.join(output_dir, "confusion_matrix.csv")
-                confusion_image = os.path.join(output_dir, "confusion_matrix.png")
-                save_confusion_matrix_as_csv(test_labels.values.ravel(), predictions, confusion_csv)
-                save_confusion_matrix_as_image(test_labels.values.ravel(), predictions, confusion_image)
-                mlflow.log_artifacts(output_dir, artifact_path="confusion_matrix")
+    with mlflow.start_run(run_id=best_run_id):
+        final_results = {}
+        for split_name, (features, split_labels) in {
+            "calibration": (calibration_data, calibration_labels),
+            "test": (test_data, test_labels),
+        }.items():
+            final_results.update({
+                f"{split_name}_{metric}": value
+                for metric, value in evaluate(best_clf, features.values, split_labels.values.ravel()).items()
+            })
+        mlflow.log_metrics(final_results)
+        mlflow.set_tag("selected_model", "true")
+        print(f"Final evaluation results for {best_name}: {final_results}")
+
+        if args.confusion_matrix_path:
+            predictions = (best_clf.predict_proba(test_data.values)[:, 1] >= 0.5).astype(int)
+            output_dir = os.path.join(args.confusion_matrix_path, best_name)
+            os.makedirs(output_dir, exist_ok=True)
+            confusion_csv = os.path.join(output_dir, "confusion_matrix.csv")
+            confusion_image = os.path.join(output_dir, "confusion_matrix.png")
+            save_confusion_matrix_as_csv(test_labels.values.ravel(), predictions, confusion_csv)
+            save_confusion_matrix_as_image(test_labels.values.ravel(), predictions, confusion_image)
+            mlflow.log_artifacts(output_dir, artifact_path="confusion_matrix")
 
 # Example usage:
 # python src/baseline_model.py --data data/fingerprints --confusion-matrix-path data/confusion_matrices
