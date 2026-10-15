@@ -196,6 +196,59 @@ def calibration_metrics(labels: np.ndarray, probabilities: np.ndarray, n_bins: i
     }
 
 
+def bootstrap_metric_intervals(
+    labels,
+    uncalibrated,
+    calibrated,
+    n_bins: int = DEFAULT_BINS,
+    n_resamples: int = 1000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> dict:
+    """Paired percentile-bootstrap intervals over test molecules.
+
+    The temperature is held fixed (it was fitted on validation), and the same resampled
+    molecules score both probability sets, so `delta` (calibrated - uncalibrated; negative
+    means improvement for all three metrics) is a paired difference. Caveats: this captures
+    test-sample noise only, not temperature-fit variance, and ordinary resampling ignores
+    scaffold-level dependence, so the intervals are optimistic. Treat an interval for
+    `delta` that contains 0 as no evidence of improvement.
+    """
+    labels, uncalibrated = _validate_binary_predictions(labels, uncalibrated)
+    _, calibrated = _validate_binary_predictions(labels, calibrated)
+    if not isinstance(n_resamples, int) or n_resamples < 1:
+        raise ValueError("n_resamples must be a positive integer.")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be in (0, 1).")
+
+    generator = np.random.default_rng(seed)
+    names = ("Brier", "NLL", "ECE")
+    samples = {kind: {m: np.empty(n_resamples) for m in names} for kind in ("uncalibrated", "calibrated")}
+    for i in range(n_resamples):
+        index = generator.integers(0, labels.shape[0], labels.shape[0])
+        for kind, probabilities in (("uncalibrated", uncalibrated), ("calibrated", calibrated)):
+            metrics = calibration_metrics(labels[index], probabilities[index], n_bins)
+            for name in names:
+                samples[kind][name][i] = metrics[name]
+
+    lower, upper = (1 - confidence) / 2 * 100, (1 + confidence) / 2 * 100
+
+    def interval(values: np.ndarray) -> dict:
+        low, high = np.percentile(values, [lower, upper])
+        return {"lower": float(low), "upper": float(high)}
+
+    return {
+        "method": "paired percentile bootstrap over test samples (temperature held fixed)",
+        "n_resamples": n_resamples,
+        "confidence": confidence,
+        "seed": seed,
+        "caveat": "Ignores scaffold-level dependence and temperature-fit variance; intervals are optimistic.",
+        "uncalibrated": {m: interval(samples["uncalibrated"][m]) for m in names},
+        "calibrated": {m: interval(samples["calibrated"][m]) for m in names},
+        "delta": {m: interval(samples["calibrated"][m] - samples["uncalibrated"][m]) for m in names},
+    }
+
+
 def reliability_table(labels, uncalibrated, calibrated, n_bins: int = DEFAULT_BINS) -> list[dict]:
     """Per-bin counts, mean probability and observed fraction for both probability sets."""
     rows = []
@@ -266,6 +319,8 @@ def calibrate_and_compare(
     test_labels,
     output_directory: str,
     n_bins: int = DEFAULT_BINS,
+    n_bootstrap: int = 1000,
+    bootstrap_seed: int = 0,
 ) -> dict:
     """Fit T on validation, then compare uncalibrated vs scaled probabilities on the same test samples.
 
@@ -287,8 +342,16 @@ def calibrate_and_compare(
         reliability_table(test_labels, uncalibrated, calibrated, n_bins),
         output / "reliability_table.csv",
     )
+    uncertainty = (
+        bootstrap_metric_intervals(
+            test_labels, uncalibrated, calibrated, n_bins, n_bootstrap, seed=bootstrap_seed
+        )
+        if n_bootstrap > 0
+        else None
+    )
     return {
         "temperature": temperature,
+        "uncertainty": uncertainty,
         "n_test_samples": int(test_labels.shape[0]),
         "uncalibrated": calibration_metrics(test_labels, uncalibrated, n_bins),
         "calibrated": calibration_metrics(test_labels, calibrated, n_bins),
@@ -363,7 +426,12 @@ def load_calibration(filepath, expected_model: str | None = None) -> dict:
     If expected_model is given and the artifact names a different model, raise so a
     temperature fitted for one model is never applied to another.
     """
-    payload = json.loads(Path(filepath).read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(Path(filepath).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Calibration file {filepath} is not valid JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"Calibration file {filepath} must contain a JSON object.")
     version = payload.get("schema_version", 1)
     if not isinstance(version, int) or version > SCHEMA_VERSION:
         raise ValueError(f"Unsupported calibration schema_version: {version!r}.")
@@ -438,14 +506,42 @@ def _positive_int(value: str) -> int:
     return number
 
 
+FIT_SPLIT = "validation"
+EVAL_SPLIT = "test"
+KNOWN_SPLITS = ("train", "validation", "calibration", "test")
+
+
+def check_split_filename(path: str, expected_split: str, role: str) -> None:
+    """Reject a file whose name states a different split than the role it is given.
+
+    Files named after a known split (for example `test_predictions.csv`) must match the
+    role; other names are allowed and are recorded as-is in the metadata.
+    """
+    name = Path(path).name.lower()
+    for split in KNOWN_SPLITS:
+        if name.startswith(split) and split != expected_split:
+            raise ValueError(
+                f"{path} looks like {split!r} predictions but was given as the {role} input, "
+                f"which must come from the {expected_split!r} split."
+            )
+
+
 def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Fit a temperature on validation predictions and compare calibration on test."
+        description=f"Fit a temperature on {FIT_SPLIT}-split predictions and compare calibration on "
+        f"{EVAL_SPLIT}-split predictions. The {EVAL_SPLIT} split is never used to fit; the "
+        "calibration split is reserved for conformal prediction and is not used here."
     )
-    parser.add_argument("--validation", required=True, help="Validation predictions CSV.")
-    parser.add_argument("--test", required=True, help="Test predictions CSV.")
+    parser.add_argument(
+        "--fit-predictions", "--validation", dest="fit_predictions", required=True,
+        help=f"Predictions CSV from the {FIT_SPLIT} split; the temperature is fitted on it.",
+    )
+    parser.add_argument(
+        "--eval-predictions", "--test", dest="eval_predictions", required=True,
+        help=f"Predictions CSV from the {EVAL_SPLIT} split; used only for the before/after comparison.",
+    )
     parser.add_argument("--output-dir", default="model/calibration", help="Directory for the diagram and table.")
     parser.add_argument(
         "--temperature-output",
@@ -455,19 +551,34 @@ def main() -> None:
     parser.add_argument("--model-name", help="Model the predictions came from; stored in the JSON.")
     parser.add_argument("--checkpoint", help="Checkpoint or run identifier; stored in the JSON.")
     parser.add_argument("--bins", type=_positive_int, default=DEFAULT_BINS, help="Number of ECE/reliability bins.")
+    parser.add_argument(
+        "--bootstrap", type=int, default=1000,
+        help="Bootstrap resamples for 95%% metric intervals on the test set (0 disables).",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Bootstrap random seed.")
     parser.add_argument("--mlflow-experiment", help="If set, log metrics (test_<kind>_<metric>) and artifacts to this MLflow experiment.")
     parser.add_argument("--mlflow-tracking-uri", help="MLflow tracking URI (defaults to the repository setting).")
     args = parser.parse_args()
+    if args.bootstrap < 0:
+        parser.error("--bootstrap must be >= 0.")
+    if Path(args.fit_predictions).resolve() == Path(args.eval_predictions).resolve():
+        parser.error("--fit-predictions and --eval-predictions must be different files.")
+    try:
+        check_split_filename(args.fit_predictions, FIT_SPLIT, "--fit-predictions")
+        check_split_filename(args.eval_predictions, EVAL_SPLIT, "--eval-predictions")
+    except ValueError as error:
+        parser.error(str(error))
 
-    validation_logits, validation_labels = _read_predictions(args.validation)
-    test_logits, test_labels = _read_predictions(args.test)
-    validation_counts = class_counts(validation_labels)
-    test_counts = class_counts(test_labels)
-    print(f"Validation samples: {validation_counts}")
-    print(f"Test samples: {test_counts}")
+    fit_logits, fit_labels = _read_predictions(args.fit_predictions)
+    eval_logits, eval_labels = _read_predictions(args.eval_predictions)
+    fit_counts = class_counts(fit_labels)
+    eval_counts = class_counts(eval_labels)
+    print(f"Fit split ({FIT_SPLIT}) samples: {fit_counts}")
+    print(f"Evaluation split ({EVAL_SPLIT}) samples: {eval_counts}")
 
     result = calibrate_and_compare(
-        validation_logits, validation_labels, test_logits, test_labels, args.output_dir, args.bins
+        fit_logits, fit_labels, eval_logits, eval_labels, args.output_dir, args.bins,
+        args.bootstrap, args.seed,
     )
 
     temperature_path = args.temperature_output or str(Path(args.output_dir) / "calibration.json")
@@ -476,13 +587,13 @@ def main() -> None:
         temperature_path,
         model=args.model_name,
         checkpoint=args.checkpoint,
-        fitted_on="validation",
-        fitted_on_note="Validation also drove checkpoint selection, so the fit is not fully independent.",
-        evaluated_on="test",
-        validation_files=str(args.validation),
-        test_files=str(args.test),
-        validation_counts=validation_counts,
-        test_counts=test_counts,
+        fit_split=FIT_SPLIT,
+        fit_predictions_file=str(args.fit_predictions),
+        fit_counts=fit_counts,
+        fit_split_note="The fit split also drove checkpoint selection, so the fit is not fully independent.",
+        eval_split=EVAL_SPLIT,
+        eval_predictions_file=str(args.eval_predictions),
+        eval_counts=eval_counts,
         n_bins=args.bins,
         metrics={"uncalibrated": result["uncalibrated"], "calibrated": result["calibrated"]},
     )
@@ -490,6 +601,10 @@ def main() -> None:
     print(f"Temperature: {result['temperature']:.4f}")
     for kind in ("uncalibrated", "calibrated"):
         print(f"{kind}: {result[kind]}")
+    if result["uncertainty"]:
+        level = result["uncertainty"]["confidence"]
+        for metric, bounds in result["uncertainty"]["delta"].items():
+            print(f"delta {metric} ({level:.0%} CI, calibrated - uncalibrated): [{bounds['lower']:.4f}, {bounds['upper']:.4f}]")
 
     report_path = Path(args.output_dir) / "calibration_report.json"
     report = {
@@ -498,13 +613,16 @@ def main() -> None:
         "checkpoint": args.checkpoint,
         "positive_class": POSITIVE_CLASS_NOTE,
         "temperature": result["temperature"],
-        "fitted_on": "validation",
-        "evaluated_on": "test",
-        "validation_counts": validation_counts,
-        "test_counts": test_counts,
+        "fit_split": FIT_SPLIT,
+        "fit_predictions_file": str(args.fit_predictions),
+        "fit_counts": fit_counts,
+        "eval_split": EVAL_SPLIT,
+        "eval_predictions_file": str(args.eval_predictions),
+        "eval_counts": eval_counts,
         "binning": {"n_bins": args.bins, "scheme": "fixed-width on [0, 1] for P(class 1)"},
         "brier_convention": "binary positive-class: mean((p - y)^2)",
         "metrics": {"uncalibrated": result["uncalibrated"], "calibrated": result["calibrated"]},
+        "uncertainty": result["uncertainty"],
     }
     report_path.write_text(json.dumps(report, indent=2, default=_json_default), encoding="utf-8")
 
@@ -555,11 +673,14 @@ if __name__ == "__main__":
 #   10-bin diagram has sparse bins that shift with one or two molecules. Use the 10-bin default
 #   as a fixed baseline, check the per-bin counts (histogram panel / reliability_table.csv),
 #   read Brier and NLL alongside ECE, and do not claim a small ECE difference is a meaningful
-#   improvement. Bootstrap intervals are not provided; ordinary resampling would also ignore
-#   scaffold-level dependence between molecules.
+#   improvement. Bootstrap intervals (paired, over test molecules) are reported but ignore
+#   scaffold-level dependence between molecules, so they are optimistic.
 # - Sklearn models have no logits: use probabilities_to_logits(predict_proba(X)).
 # - CLI input CSVs need a `label` column (0/1) plus either `logit_0`,`logit_1` or `probability`
 #   (the probability of class 1, i.e. a BACE-1 inhibitor; not an arbitrary confidence score):
-#       python src/calibration.py --validation val_preds.csv --test test_preds.csv --model-name GCN --output-dir model/calibration
+#       python src/calibration.py --fit-predictions validation_predictions.csv --eval-predictions test_predictions.csv --model-name GCN --output-dir model/calibration
+#   The fit input must be the validation split and the evaluation input the test split; files named
+#   after a different split (e.g. test_predictions.csv as the fit input) are rejected. --validation
+#   and --test remain as aliases.
 # - Do not divide a probability by T; convert to log-probabilities with probabilities_to_logits first.
 # - Calibrated probabilities are not a validated estimate of prospective experimental success.

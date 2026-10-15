@@ -236,6 +236,7 @@ class PipelineRunner:
         output_directory: str | None,
         temperature_output: str | None,
         bins: int,
+        bootstrap: int = 1000,
     ) -> None:
         if model_type == BEST_BASELINE:
             selection = self.paths.predictions_directory / "selected_baseline.json"
@@ -266,14 +267,16 @@ class PipelineRunner:
             temperature_output = str(self.paths.model_directory / f"{model_type}.calibration.json")
         checkpoint = self._checkpoint_for(model_type)
         arguments = [
-            "--validation",
+            "--fit-predictions",
             validation_predictions,
-            "--test",
+            "--eval-predictions",
             test_predictions,
             "--output-dir",
             output_directory,
             "--bins",
             str(bins),
+            "--bootstrap",
+            str(bootstrap),
         ]
         if model_type:
             arguments.extend(["--model-name", model_type])
@@ -466,6 +469,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     calibrate_parser.add_argument("--temperature-output", help="Path for the calibration JSON. Defaults to model/<model-type>.calibration.json.")
     calibrate_parser.add_argument("--bins", type=_positive_int, default=10)
+    calibrate_parser.add_argument(
+        "--bootstrap", type=int, default=1000,
+        help="Bootstrap resamples for test-set metric intervals (0 disables).",
+    )
 
     all_parser = commands.add_parser("all", help="Run split, fingerprints, baselines, and GNN training.")
     _add_common_arguments(all_parser)
@@ -533,6 +540,7 @@ def main() -> None:
             args.output_dir,
             args.temperature_output,
             args.bins,
+            args.bootstrap,
         )
     else:
         runner.run_complete_pipeline(

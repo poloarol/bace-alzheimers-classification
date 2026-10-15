@@ -179,8 +179,10 @@ The default experiments are:
 
 ## Results
 
-The GNN training workflow reports the following held-out test metrics from the
-checkpoint with the best validation accuracy:
+The table below is a historical result from an earlier training implementation
+in which test accuracy influenced checkpoint selection; it is optimistic and
+is not reproduced by the current code, which no longer scores the test split
+during training. Regenerate results by running the pipeline.
 
 | Metric | Score |
 |---|---:|
@@ -189,9 +191,10 @@ checkpoint with the best validation accuracy:
 | Balanced accuracy | 0.8178144255164914 |
 | Inhibitor F1 | 0.8242074927953891 |
 
-The same metrics are logged to MLflow using the exact metric names above.
-Training logs train and validation metrics by epoch and does not score the
-calibration or test splits. Each PyTorch model is saved under
+The current GNN code keeps the checkpoint with the highest **validation
+accuracy** (early stopping patience of 20 epochs). Training logs train and
+validation metrics by epoch and `best_validation_accuracy`; it does not score
+the calibration or test splits. Each PyTorch model is saved under
 its model-specific artifact path (`GCN-Model`, `GAT-Model`, or
 `GATGraphTransformer-Model`). Local state-dict checkpoints default to
 `model\GCN.pth`, `model\GAT.pth`, and `model\GATGraphTransformer.pth`.
@@ -326,7 +329,16 @@ Use `--hidden-channels` and `--learning-rate` to change model settings.
 
 ### Probability calibration
 
-Calibration uses temperature scaling: a single positive temperature `T` is fitted on the **validation** logits and labels, and probabilities become `softmax(logits / T)`. Argmax predictions, ROC-AUC, and PR-AUC are unchanged; only probability quality improves. The test set is never used to fit `T`.
+Calibration uses temperature scaling: a single positive temperature `T` is fitted on the **validation** logits and labels by minimising NLL of `softmax(logits / T)` with LBFGS on `log T` (so `T > 0`; the fit must land in [0.01, 100] and not worsen validation NLL). Probabilities become `softmax(logits / T)`. Argmax predictions, ROC-AUC, and PR-AUC are unchanged; only probability quality can improve. The test set is never used to fit `T`, and the calibration split is not used by this stage.
+
+Data roles in the current code:
+
+| Split | Used for |
+|---|---|
+| Train | Fitting model parameters. |
+| Validation | GNN checkpoint selection (best validation accuracy) and early stopping, baseline selection (validation PR-AUC), and fitting `T`. |
+| Calibration | Not used by temperature scaling; reserved for future conformal prediction. |
+| Test | Final evaluation only: before/after calibration metrics and the bootstrap intervals. |
 
 Calibration is a separate downstream stage: training writes only the labelled raw logits, and `src/calibration.py` is the single place that fits `T`, evaluates it on test, and writes the calibration artifact. This lets you recalibrate without retraining.
 
@@ -345,7 +357,7 @@ data/MoleculeNet/bace/output/predictions/selected_baseline.json                 
 model/<ModelName>.calibration.json                                                # canonical artifact: T, model, checkpoint, class convention, counts, before/after metrics
 data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_diagram.png
 data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_table.csv
-data/MoleculeNet/bace/output/calibration/<ModelName>/calibration_report.json     # machine-readable before/after metrics, counts, binning
+data/MoleculeNet/bace/output/calibration/<ModelName>/calibration_report.json     # machine-readable before/after metrics, counts, binning, bootstrap intervals
 ```
 
 Calibration runs also log to the MLflow experiment `bace-calibration` (run tagged with `model`; metrics `temperature` and `test_{uncalibrated,calibrated}_{brier,nll,ece}`; artifacts under `calibration/`). Training runs no longer carry calibration metrics. Snakemake declares the calibration JSON, diagram, table and report as outputs of `calibrate_gnn`.
@@ -359,19 +371,28 @@ python app.py calibrate --model-type GCN            # or GAT, GATGraphTransforme
 python app.py calibrate --model-type best-baseline  # the baseline selected by validation PR-AUC
 ```
 
-This prints sample and class counts, `T`, and the before/after Brier, NLL, and ECE. `--bins` must be a positive integer (default 10). Use `--output-dir` and `--temperature-output` to change locations.
+This prints sample and class counts, `T`, the before/after Brier, NLL, and ECE, and bootstrap intervals for the calibrated-minus-uncalibrated differences. `--bins` must be a positive integer (default 10); `--bootstrap N` sets the number of resamples (default 1000, `0` disables); the CLI also accepts `--seed`. Use `--output-dir` and `--temperature-output` to change locations.
 
-To calibrate arbitrary predictions instead, pass CSVs with a `label` column (0/1) plus either `logit_0`/`logit_1` or `probability`, the probability of class 1 (not an arbitrary confidence score). Inputs are checked for finite values and binary labels:
+To calibrate arbitrary predictions instead, pass CSVs with a `label` column (0/1) plus either `logit_0`/`logit_1` or `probability`, the probability of class 1 (not an arbitrary confidence score). Inputs are checked for finite values and binary labels. The fit input must come from the validation split and the evaluation input from the test split: a file named after another split (for example `test_predictions.csv` passed as `--fit-predictions`) is rejected, and the two files must differ. The calibration JSON and report record `fit_split`, `fit_predictions_file`, `fit_counts`, `eval_split`, `eval_predictions_file` and `eval_counts`:
+
+```bash
+python src/calibration.py \
+  --fit-predictions validation_predictions.csv \
+  --eval-predictions test_predictions.csv \
+  --model-name GCN
+```
+
+`--validation` and `--test` remain accepted as aliases for these two options.
 
 ```bash
 python app.py calibrate \
-  --validation-predictions val_preds.csv \
-  --test-predictions test_preds.csv
+  --validation-predictions validation_predictions.csv \
+  --test-predictions test_predictions.csv
 ```
 
 **Calibrated inference.** `app.py inference` automatically passes `model/<model-type>.calibration.json` to `src/inference.py` when it exists (or pass `--calibration-file`). The model name must match the artifact. Scaling is applied to logits (log-probabilities for sklearn), never by dividing probabilities by `T`, and `calibrated_predictions.csv` is written next to the confusion matrix. A calibrated probability is not a validated estimate of prospective experimental success.
 
-**Interpreting the results.** The test split holds roughly 150 molecules, so a 10-bin reliability diagram has sparsely populated bins that can shift with one or two molecules. The diagram therefore includes a histogram of samples per bin, and `reliability_table.csv` lists per-bin counts, mean probabilities, and observed fractions for both probability sets. Ten bins is a fixed baseline; the bin count should not be tuned to improve the plot. Read Brier score and NLL alongside ECE, and do not treat a small ECE difference as a meaningful improvement. Bootstrap intervals are not provided; ordinary resampling would also ignore scaffold-level dependence between molecules. Brier score is the binary positive-class version (`mean((p - y)^2)`), half the multiclass sum-over-classes convention.
+**Interpreting the results.** The test split holds roughly 150 molecules, so a 10-bin reliability diagram has sparsely populated bins that can shift with one or two molecules. The diagram therefore includes a histogram of samples per bin, and `reliability_table.csv` lists per-bin counts, mean probabilities, and observed fractions for both probability sets. Ten bins is a fixed baseline; the bin count should not be tuned to improve the plot. Read Brier score and NLL alongside ECE, and do not treat a small ECE difference as a meaningful improvement. **Uncertainty.** The report and console include 95% paired percentile-bootstrap intervals (1000 resamples by default) over test molecules for each metric and for the calibrated-minus-uncalibrated difference (`delta`, negative means better for Brier, NLL and ECE). `T` is held fixed, and the same resampled molecules score both probability sets. These intervals capture test-sample noise only: they ignore variance in the fitted `T` and the scaffold-level dependence between molecules, so they are optimistic. If a `delta` interval contains 0, there is no evidence of improvement. Brier score is the binary positive-class version (`mean((p - y)^2)`), half the multiclass sum-over-classes convention.
 
 ### 5. Run inference
 
@@ -457,8 +478,10 @@ The suite covers split-file keys, index coverage, class representation,
 scaffold isolation, graph-cache invalidation, fingerprint generation, baseline
 models, GNN model construction and forward passes, inference outputs, MLflow
 utilities, CLI parsing, train/validation model selection behavior, and
-calibration (temperature fitting, input validation, metrics, artifact
-round trips). `pytest` is not required; the suite uses `unittest`.
+calibration (temperature fitting, input validation, edge cases such as T = 1,
+overconfident logits, invalid probabilities, single-class labels, empty or
+mismatched inputs, invalid JSON, model-identity mismatches, bootstrap intervals,
+artifact round trips, CLI end to end). `pytest` is not required; the suite uses `unittest`.
 
 Other supported architectures include `GCN` and `GATGraphTransformer`.
 
@@ -482,7 +505,7 @@ Execute the workflow:
 snakemake --cores 1
 ```
 
-The workflow orchestrates scaffold splitting, fingerprint generation, baseline training, and graph-model training according to `config.yaml`.
+The workflow orchestrates scaffold splitting, fingerprint generation, baseline training, graph-model training, and per-GNN calibration (`calibrate_gnn`, which reads the saved validation/test logits and can be rerun without retraining) according to `config.yaml`. Baselines are calibrated through `python app.py calibrate --model-type best-baseline` because the winning baseline is only known after training. Snakemake paths are built with `os.path.join`; set `python` in `config.yaml` (or `--config python=...`) to the interpreter that has the project dependencies.
 
 ## MLflow experiment tracking
 
@@ -516,9 +539,9 @@ Several limitations should be addressed before treating the current results as a
 
 **Scaffold distribution shift.** Molecules with previously unseen scaffolds may differ substantially from the training compounds. Scaffold-aware evaluation helps investigate this challenge but does not eliminate distribution shift.
 
-**Probability reliability.** Softmax probabilities are not necessarily calibrated. Temperature scaling is applied after training, but with a small validation split the fitted temperature is itself noisy, and a high predicted probability should not automatically be interpreted as a reliable estimate of activity.
+**Probability reliability.** Softmax probabilities are not necessarily calibrated. Temperature scaling is applied after training, but with a small validation split the fitted temperature is itself noisy, and a high predicted probability should not automatically be interpreted as a reliable estimate of activity. Calibration is assessed on a test split of roughly 150 molecules; bootstrap intervals ignore scaffold dependence and the uncertainty in `T`.
 
-**Limited interpretability and uncertainty estimation.** The current pipeline does not yet provide validated molecular explanations, calibrated predictive probabilities, or conformal prediction sets.
+**Limited interpretability and uncertainty estimation.** The pipeline does not yet provide validated molecular explanations or conformal prediction sets. Temperature scaling and bootstrap intervals address probability quality only, not per-molecule uncertainty.
 
 **Benchmark scope.** Results on one molecular target do not establish generalization to other targets or prospective drug-discovery settings.
 
@@ -533,8 +556,8 @@ Introduce a fixed, scaffold-aware four-way split:
 | Partition | Target proportion | Purpose |
 |---|---:|---|
 | Training | 70% | Fit model parameters. |
-| Validation | 10% | Model selection and checkpoint selection. |
-| Calibration | 10% | Fit probability calibration and conformal thresholds. |
+| Validation | 10% | Checkpoint/model selection, early stopping, and fitting the temperature (currently). |
+| Calibration | 10% | Reserved for conformal thresholds (not used by temperature scaling). |
 | Test | 10% | Final, untouched evaluation. |
 
 The target counts are approximate; scaffold grouping and class balance may affect the actual partition sizes.
@@ -549,7 +572,7 @@ The implementation should:
 
 ### 2. Probability calibration
 
-**Status: implemented** (see [Probability calibration](#probability-calibration)). Temperature scaling is fitted on validation logits and evaluated on the test split with Brier score, NLL, ECE and reliability diagrams (with per-bin counts). Still planned: uncertainty intervals for these metrics (ordinary bootstrap ignores scaffold-level dependence) and an independent temperature-fitting set.
+**Status: implemented** (see [Probability calibration](#probability-calibration)). Temperature scaling is fitted on validation logits and evaluated on the test split with Brier score, NLL, ECE, reliability diagrams (with per-bin counts) and paired bootstrap intervals. Still planned: an independent temperature-fitting set (for example cross-fitting) and scaffold-aware uncertainty intervals; the current bootstrap intervals are optimistic (see above).
 
 ### 3. Conformal prediction
 

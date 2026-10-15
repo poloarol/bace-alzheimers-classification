@@ -115,7 +115,7 @@ rule calibrate_gnn:
         output_dir=CALIBRATION_DIR
     shell:
         "{PYTHON} " + SCRIPT("calibration.py") + " "
-        "--validation {input.validation} --test {input.test} "
+        "--fit-predictions {input.validation} --eval-predictions {input.test} "
         "--model-name {wildcards.model} --checkpoint {input.checkpoint} "
         "--output-dir {params.output_dir} --temperature-output {output[0]} "
         "--mlflow-experiment bace-calibration"
