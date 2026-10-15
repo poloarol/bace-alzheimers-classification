@@ -7,6 +7,17 @@ beta-secretase 1 (BACE1).
 
 Can we identify when a GNN's molecular activity prediction is reliable, quantify the uncertainty of that prediction, and explain which molecular substructures contributed to it?
 
+```
+Experiment	Main question
+GCN vs. GAT vs. GATGraphTransformer	Which architecture discriminates best?
+Single model vs. ensemble	Does ensemble disagreement help identify errors?
+Raw vs. calibrated probabilities	Are the probabilities more reliable?
+Standard classification vs. conformal prediction	What coverage and prediction-set size can be achieved?
+Seen vs. unseen scaffolds	How robust are the methods to molecular novelty?
+XAI across models and seeds	Are the explanations stable and informative?
+
+```
+
 ## What was implemented
 
 - BACE molecule graph processing with DeepChem and PyTorch Geometric.
