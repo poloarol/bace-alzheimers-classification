@@ -28,12 +28,13 @@ def train(model, train_loader):
     model.train()
 
     for data in train_loader:  # Iterate in batches over the training dataset.
-         out = model(data.x, data.edge_index, data.batch, data.edge_attr)
-         loss = criterion(out, data.y.view(-1))  # Compute the loss.
-         loss.backward()  # Derive gradients.
-         optimizer.step()  # Update parameters based on gradients.
-         optimizer.zero_grad()  # Clear gradients.
-
+        
+        optimizer.zero_grad()  # Clear gradients.
+        out = model(data.x, data.edge_index, data.batch, data.edge_attr)
+        loss = criterion(out, data.y.view(-1))  # Compute the loss.
+        loss.backward()  # Derive gradients.
+        optimizer.step()  # Update parameters based on gradients.
+        
 def classification_metrics(labels, scores, predictions):
     return {
         "Accuracy": accuracy_score(labels, predictions),
@@ -166,11 +167,11 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     criterion = torch.nn.CrossEntropyLoss()
 
-    patience = 20       # Stop after 10 epochs without improvement
+    patience = 20
     eval_every = 5
-    best_val_acc = 0.0
-    epochs_without_improvement = 5
-    best_model_state = copy.deepcopy(model.state_dict())
+    best_val_acc = float("-inf")
+    epochs_without_improvement = 0
+    best_model_state = None
 
     progress = trange(1, args.epochs + 1, desc="Training")
 
@@ -200,12 +201,6 @@ if __name__ == "__main__":
                 step=epoch,
             )
 
-            progress.set_postfix(
-                train_acc=f"{train_metrics['Accuracy']:.4f}",
-                val_acc=f"{validation_metrics['Accuracy']:.4f}",
-                best_val_acc=f"{best_val_acc:.4f}",
-            )
-
             if validation_metrics["Accuracy"] > best_val_acc:
                 best_val_acc = validation_metrics["Accuracy"]
                 best_model_state = copy.deepcopy(model.state_dict())
@@ -213,12 +208,24 @@ if __name__ == "__main__":
             else:
                 epochs_without_improvement += 1
 
+            progress.set_postfix(
+                train_acc=f"{train_metrics['Accuracy']:.4f}",
+                val_acc=f"{validation_metrics['Accuracy']:.4f}",
+                best_val_acc=f"{best_val_acc:.4f}",
+            )
+
             if epochs_without_improvement >= patience:
                 progress.write(
                     f"Early stopping at epoch {epoch}. "
                     f"Best validation accuracy: {best_val_acc:.4f}"
                 )
                 break
+
+    if best_model_state is None:
+        raise RuntimeError("Training ended without saving a model checkpoint.")
+
+    model.load_state_dict(best_model_state)
+            
 
     model.load_state_dict(best_model_state)
     mlflow.log_metric("best_validation_accuracy", best_val_acc)
