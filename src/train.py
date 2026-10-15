@@ -162,32 +162,26 @@ if __name__ == "__main__":
         if epoch % eval_every == 0 or epoch == 1:
             train_metrics = evaluate(model, train_loader)
             validation_metrics = evaluate(model, validation_loader)
-            calibration_metrics = evaluate(model, calibration_loader)
-            test_metrics = evaluate(model, test_loader)
-            mlflow.log_metrics({
-                "train_accuracy": train_metrics["Accuracy"],
-                "validation_accuracy": validation_metrics["Accuracy"],
-                "validation_roc_auc": validation_metrics["ROC-AUC"],
-                "validation_pr_auc": validation_metrics["PR-AUC"],
-                "validation_balanced_accuracy": validation_metrics["Balanced accuracy"],
-                "validation_inhibitor_f1": validation_metrics["Inhibitor F1"],
-                "calibration_accuracy": calibration_metrics["Accuracy"],
-                "calibration_roc_auc": calibration_metrics["ROC-AUC"],
-                "calibration_pr_auc": calibration_metrics["PR-AUC"],
-                "calibration_balanced_accuracy": calibration_metrics["Balanced accuracy"],
-                "calibration_inhibitor_f1": calibration_metrics["Inhibitor F1"],
-                "test_accuracy": test_metrics["Accuracy"],
-                "test_roc_auc": test_metrics["ROC-AUC"],
-                "test_pr_auc": test_metrics["PR-AUC"],
-                "test_balanced_accuracy": test_metrics["Balanced accuracy"],
-                "test_inhibitor_f1": test_metrics["Inhibitor F1"],
-            }, step=epoch)
+
+            mlflow.log_metrics(
+                {
+                    "train_accuracy": train_metrics["Accuracy"],
+                    "validation_accuracy": validation_metrics["Accuracy"],
+                    "validation_roc_auc": validation_metrics["ROC-AUC"],
+                    "validation_pr_auc": validation_metrics["PR-AUC"],
+                    "validation_balanced_accuracy": validation_metrics[
+                        "Balanced accuracy"
+                    ],
+                    "validation_inhibitor_f1": validation_metrics[
+                        "Inhibitor F1"
+                    ],
+                },
+                step=epoch,
+            )
 
             progress.set_postfix(
                 train_acc=f"{train_metrics['Accuracy']:.4f}",
                 val_acc=f"{validation_metrics['Accuracy']:.4f}",
-                test_acc=f"{test_metrics['Accuracy']:.4f}",
-                roc_auc=f"{test_metrics['ROC-AUC']:.4f}",
                 best_val_acc=f"{best_val_acc:.4f}",
             )
 
@@ -196,7 +190,7 @@ if __name__ == "__main__":
                 best_model_state = copy.deepcopy(model.state_dict())
                 epochs_without_improvement = 0
             else:
-                epochs_without_improvement += eval_every if epoch != 1 else 1
+                epochs_without_improvement += 1
 
             if epochs_without_improvement >= patience:
                 progress.write(
@@ -206,9 +200,15 @@ if __name__ == "__main__":
                 break
 
     model.load_state_dict(best_model_state)
-    mlflow.log_metric("best_test_accuracy", best_val_acc)
+    mlflow.log_metric("best_validation_accuracy", best_val_acc)
+    final_calibration_metrics = evaluate(model, calibration_loader)
     final_test_metrics = evaluate(model, test_loader)
+    mlflow.log_metrics({
+        f"calibration_{metric}": value
+        for metric, value in final_calibration_metrics.items()
+    })
     mlflow.log_metrics(final_test_metrics)
+    print(f"Final calibration metrics: {final_calibration_metrics}")
     print(f"Final test metrics: {final_test_metrics}")
     mlflow.pytorch.log_model(
         model,

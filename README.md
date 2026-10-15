@@ -220,6 +220,9 @@ The archive contains `train_idx`, `validation_idx`, `calibration_idx`, and
 calibration, and 10% test. Override them with `--train-size`,
 `--validation-size`, `--calibration-size`, and `--test-size`; proportions must
 sum to 1. Use `--n-trials` to change the scaffold-assignment search budget.
+The split command verifies class representation, complete index coverage,
+scaffold separation, and the expected four-array archive contract before
+logging the split artifact.
 
 ### 2. Generate Morgan fingerprints
 
@@ -313,7 +316,9 @@ graph splits from the split archive. Missing processed graph files are created
 automatically under `data/MoleculeNet/bace/processed/`. The validation split
 controls checkpoint selection and early stopping; calibration and test splits
 are evaluation-only. The GNN command logs epoch-level metrics and the final
-test metrics to MLflow.
+calibration and test metrics to MLflow after model selection. Processed graph
+cache names include a hash of the split archive, so changing the split causes
+the affected datasets to be rebuilt automatically.
 Use `--hidden-channels` and `--learning-rate` to change model settings.
 
 ### 5. Run inference
@@ -387,6 +392,18 @@ The `--model` option selects the GNN architecture for the `all` command:
 python app.py all --model GCN
 python app.py all --model GAT
 ```
+
+## Workflow tests
+
+Run the focused split-to-training workflow tests with:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+These tests cover split-file keys, index coverage, class representation,
+scaffold isolation, and graph-cache invalidation when the split archive
+changes.
 
 Other supported architectures include `GCN` and `GATGraphTransformer`.
 

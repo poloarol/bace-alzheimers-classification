@@ -11,6 +11,53 @@ import mlflow
 
 from mlflow_utils import configure_mlflow, log_parameters
 
+SPLIT_NAMES = ("train", "validation", "calibration", "test")
+
+
+def validate_split_indices(smiles, labels, split_indices):
+    """Validate split coverage, class representation, and scaffold isolation."""
+    smiles = list(smiles)
+    y = np.asarray(labels).reshape(-1)
+    if set(split_indices) != set(SPLIT_NAMES):
+        raise ValueError(
+            f"Split indices must contain exactly {SPLIT_NAMES}."
+        )
+
+    seen_indices = []
+    scaffold_to_split = {}
+    for split_name in SPLIT_NAMES:
+        indices = np.asarray(split_indices[split_name], dtype=int)
+        if indices.ndim != 1 or len(indices) == 0:
+            raise ValueError(f"{split_name} split must be a non-empty 1D array.")
+        if np.any(indices < 0) or np.any(indices >= len(smiles)):
+            raise ValueError(f"{split_name} split contains invalid indices.")
+        if len(np.unique(indices)) != len(indices):
+            raise ValueError(f"{split_name} split contains duplicate indices.")
+
+        split_labels = y[indices]
+        if set(np.unique(split_labels)) != {0, 1}:
+            raise ValueError(
+                f"{split_name} split must contain both binary classes."
+            )
+
+        for index in indices:
+            mol = Chem.MolFromSmiles(smiles[index])
+            scaffold = MurckoScaffold.MurckoScaffoldSmiles(
+                mol=mol,
+                includeChirality=False,
+            )
+            previous_split = scaffold_to_split.setdefault(scaffold, split_name)
+            if previous_split != split_name:
+                raise ValueError(
+                    f"Scaffold {scaffold!r} appears in both "
+                    f"{previous_split} and {split_name} splits."
+                )
+        seen_indices.extend(indices.tolist())
+
+    if len(seen_indices) != len(smiles) or set(seen_indices) != set(range(len(smiles))):
+        raise ValueError("Splits must cover every sample exactly once.")
+
+
 def stratified_scaffold_split(
     smiles,
     labels,
@@ -42,7 +89,7 @@ def stratified_scaffold_split(
         raise ValueError("smiles and labels must have equal lengths.")
     if not np.isin(y, [0, 1]).all():
         raise ValueError("labels must be binary and encoded as 0/1.")
-    split_names = ("train", "validation", "calibration", "test")
+    split_names = SPLIT_NAMES
     split_sizes = np.array(
         [train_size, validation_size, calibration_size, test_size],
         dtype=float,
@@ -174,7 +221,9 @@ def stratified_scaffold_split(
         ), dtype=int)
         for group_ids in best_split_groups
     ]
-    return tuple(split_indices)
+    result = dict(zip(split_names, split_indices))
+    validate_split_indices(smiles, y, result)
+    return tuple(result[split_name] for split_name in split_names)
 
 
 def _split_score(
@@ -252,6 +301,20 @@ if __name__ == "__main__":
             calibration_idx=calibration_idx,
             test_idx=test_idx,
         )
+        with np.load(args.output) as split:
+            expected_keys = {f"{name}_idx" for name in SPLIT_NAMES}
+            if set(split.files) != expected_keys:
+                raise ValueError(
+                    f"Split file must contain exactly {sorted(expected_keys)}."
+                )
+            validate_split_indices(
+                smiles,
+                labels,
+                {
+                    name: split[f"{name}_idx"]
+                    for name in SPLIT_NAMES
+                },
+            )
         mlflow.log_metrics({
             "train_samples": len(train_idx),
             "validation_samples": len(validation_idx),

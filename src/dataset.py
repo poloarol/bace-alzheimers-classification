@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 from pathlib import Path
 
@@ -10,6 +11,13 @@ import torch
 from rdkit import Chem
 from torch_geometric.data import Dataset
 from tqdm import tqdm
+
+
+def split_file_signature(split_path):
+    split_path = Path(split_path)
+    if not split_path.exists():
+        raise FileNotFoundError(f"Split file does not exist: {split_path}")
+    return hashlib.sha256(split_path.read_bytes()).hexdigest()[:16]
 
 
 class MoleculeDataset(Dataset):
@@ -47,7 +55,13 @@ class MoleculeDataset(Dataset):
 
     @property
     def processed_file_names(self):
-        return f"{self.split}_complete.txt"
+        return f"{self.split}_complete_{self._split_signature()}.txt"
+
+    def _split_path(self):
+        return Path(self.root) / "clean" / "train_test_split.npz"
+
+    def _split_signature(self):
+        return split_file_signature(self._split_path())
 
     def download(self):
         pass
@@ -64,14 +78,17 @@ class MoleculeDataset(Dataset):
         processed_index = 0
         skipped = 0
 
-        split_path = Path(self.root) / "clean" / "train_test_split.npz"
+        split_path = self._split_path()
         if not split_path.exists():
             raise FileNotFoundError(
                 f"Split file does not exist: {split_path}"
             )
 
         with np.load(split_path) as split:
-            split_indices = split[f"{self.split}_idx"]
+            key = f"{self.split}_idx"
+            if key not in split:
+                raise KeyError(f"Split file is missing expected key: {key}")
+            split_indices = split[key]
 
         if np.any(split_indices < 0) or np.any(split_indices >= len(df)):
             raise IndexError(
@@ -83,6 +100,7 @@ class MoleculeDataset(Dataset):
             .assign(original_index=split_indices)
             .reset_index(drop=True)
         )
+        signature = self._split_signature()
 
         for csv_index, row in tqdm(
             selected_rows.iterrows(),
@@ -122,9 +140,11 @@ class MoleculeDataset(Dataset):
                 # IMPORTANT:
                 # Use a contiguous processed index.
                 if self.split == "train":
-                    filename = f"data_{processed_index}.pt"
+                    filename = f"data_{signature}_{processed_index}.pt"
                 else:
-                    filename = f"data_{self.split}_{processed_index}.pt"
+                    filename = (
+                        f"data_{self.split}_{signature}_{processed_index}.pt"
+                    )
 
                 filepath = os.path.join(
                     self.processed_dir,
@@ -173,10 +193,11 @@ class MoleculeDataset(Dataset):
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Dataset index out of range: {idx}")
 
+        signature = self._split_signature()
         if self.split == "train":
-            filename = f"data_{idx}.pt"
+            filename = f"data_{signature}_{idx}.pt"
         else:
-            filename = f"data_{self.split}_{idx}.pt"
+            filename = f"data_{self.split}_{signature}_{idx}.pt"
 
         filepath = os.path.join(
             self.processed_dir,
