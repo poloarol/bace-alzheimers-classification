@@ -124,6 +124,7 @@ bace-alzheimers-classification/
     ├── build_fingerprints.py
     ├── stratified_scaffold_split.py
     ├── inference.py
+    ├── calibration.py
     └── mlflow_utils.py
 ```
 
@@ -138,6 +139,7 @@ bace-alzheimers-classification/
 | `build_fingerprints.py` | Morgan fingerprint generation. |
 | `stratified_scaffold_split.py` | Scaffold-aware dataset splitting. |
 | `inference.py` | Model inference and confusion-matrix generation. |
+| `calibration.py` | Temperature scaling, Brier/NLL/ECE metrics, and reliability diagrams. |
 | `mlflow_utils.py` | Shared MLflow configuration. |
 | `app.py` | Command-line pipeline runner. |
 | `Snakefile` | Workflow automation. |
@@ -246,7 +248,7 @@ Use `--radius` and `--n-bits` to change the fingerprint configuration.
 python app.py baseline
 ```
 
-This trains the Logistic Regression, Random Forest, and Gradient Boosting baselines and generates evaluation outputs.
+This trains the Logistic Regression, Random Forest, and Gradient Boosting baselines and scores them on the validation split. The best model by validation PR-AUC is selected; only that model is then evaluated on the calibration and test splits and temperature-calibrated (see [Probability calibration](#probability-calibration)).
 
 ### 4. Train a graph neural network
 
@@ -320,6 +322,46 @@ calibration and test metrics to MLflow after model selection. Processed graph
 cache names include a hash of the split archive, so changing the split causes
 the affected datasets to be rebuilt automatically.
 Use `--hidden-channels` and `--learning-rate` to change model settings.
+
+### Probability calibration
+
+Calibration uses temperature scaling: a single positive temperature `T` is fitted on the **validation** logits and labels, and probabilities become `softmax(logits / T)`. Argmax predictions, ROC-AUC, and PR-AUC are unchanged; only probability quality improves. The test set is never used to fit `T`.
+
+Calibration runs automatically:
+
+- `python app.py gnn ...` fits `T` on the trained model's validation logits.
+- `python app.py baseline` fits `T` for the model selected by validation PR-AUC, using the log of `predict_proba` as logits.
+
+Each run compares uncalibrated and temperature-scaled probabilities on the same test samples using Brier score, negative log-likelihood (NLL), and expected calibration error (ECE), and logs them to MLflow (`test_uncalibrated_*`, `test_calibrated_*`, `temperature`) together with a reliability diagram.
+
+Outputs:
+
+```text
+data/MoleculeNet/bace/output/predictions/<ModelName>/validation_predictions.csv   # label, logit_0, logit_1
+data/MoleculeNet/bace/output/predictions/<ModelName>/test_predictions.csv
+data/MoleculeNet/bace/output/predictions/selected_baseline.json                   # baseline only
+model/<ModelName>.calibration.json                                                # fitted temperature for reproducible inference
+model/calibration/<ModelName>/reliability_diagram.png
+```
+
+The prediction CSVs are the inputs to the standalone calibration command, so a model can be re-calibrated (for example with a different bin count) without retraining. After training, run:
+
+```bash
+python app.py calibrate --model-type GCN            # or GAT, GATGraphTransformer
+python app.py calibrate --model-type best-baseline  # the baseline selected by validation PR-AUC
+```
+
+This prints `T` and the before/after Brier, NLL, and ECE, and writes `reliability_diagram.png` and `<model-type>.calibration.json` to `data/MoleculeNet/bace/output/calibration/<model-type>/`. Use `--output-dir` and `--temperature-output` to change the locations and `--bins` to change the number of bins (default 10).
+
+To calibrate arbitrary predictions instead, pass CSVs with a `label` column plus either `logit_0`/`logit_1` or `probability` (positive class):
+
+```bash
+python app.py calibrate \
+  --validation-predictions val_preds.csv \
+  --test-predictions test_preds.csv
+```
+
+The Snakemake workflow also runs `calibrate_gnn` for every configured GNN. In Python, load a saved temperature with `calibration.load_temperature` and apply it with `calibration.apply_temperature`.
 
 ### 5. Run inference
 
@@ -462,7 +504,7 @@ Several limitations should be addressed before treating the current results as a
 
 **Scaffold distribution shift.** Molecules with previously unseen scaffolds may differ substantially from the training compounds. Scaffold-aware evaluation helps investigate this challenge but does not eliminate distribution shift.
 
-**Probability reliability.** Softmax probabilities are not necessarily calibrated. A high predicted probability should not automatically be interpreted as a reliable estimate of activity.
+**Probability reliability.** Softmax probabilities are not necessarily calibrated. Temperature scaling is applied after training, but with a small validation split the fitted temperature is itself noisy, and a high predicted probability should not automatically be interpreted as a reliable estimate of activity.
 
 **Limited interpretability and uncertainty estimation.** The current pipeline does not yet provide validated molecular explanations, calibrated predictive probabilities, or conformal prediction sets.
 

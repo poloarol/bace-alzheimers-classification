@@ -1,6 +1,8 @@
 import argparse
+import json
 import os
 import random
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,6 +15,14 @@ from sklearn.metrics import confusion_matrix, roc_auc_score, average_precision_s
 from sklearn.base import clone
 
 from mlflow_utils import configure_mlflow, log_parameters
+from calibration import (
+    calibrate_and_compare,
+    calibration_path_for,
+    probabilities_to_logits,
+    prediction_paths,
+    save_predictions,
+    save_temperature,
+)
 
 seed: int = 42
 
@@ -87,6 +97,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate a RandomForestClassifier.")
     parser.add_argument("--data", type=str, required=True, help="Path to the training data CSV file.")
     parser.add_argument("--confusion-matrix-path", type=str, help="Path to save the confusion matrix as CSV and image.")
+    parser.add_argument(
+        "--predictions-dir",
+        help="Directory for validation/test logit CSVs used by calibration. "
+        "Defaults to <confusion-matrix-path>/predictions.",
+    )
     parser.add_argument("--mlflow-experiment", default="bace-baseline", help="MLflow experiment name.")
     parser.add_argument("--mlflow-tracking-uri", help="MLflow tracking URI. Defaults to MLFLOW_TRACKING_URI or ./mlruns.")
     args = parser.parse_args()
@@ -155,6 +170,49 @@ if __name__ == "__main__":
         mlflow.log_metrics(final_results)
         mlflow.set_tag("selected_model", "true")
         print(f"Final evaluation results for {best_name}: {final_results}")
+
+        validation_probabilities = best_clf.predict_proba(validation_data.values)
+        test_probabilities = best_clf.predict_proba(test_data.values)
+        validation_logits = probabilities_to_logits(validation_probabilities)
+        test_logits = probabilities_to_logits(test_probabilities)
+        predictions_dir = args.predictions_dir or os.path.join(
+            args.confusion_matrix_path or "model", "predictions"
+        )
+        validation_predictions_path, test_predictions_path = prediction_paths(predictions_dir, best_name)
+        save_predictions(validation_labels.values.ravel(), validation_logits, validation_predictions_path)
+        save_predictions(test_labels.values.ravel(), test_logits, test_predictions_path)
+        Path(predictions_dir, "selected_baseline.json").write_text(
+            json.dumps({"model": best_name}), encoding="utf-8"
+        )
+        mlflow.log_artifacts(os.path.dirname(validation_predictions_path), artifact_path="predictions")
+        print(f"Saved calibration inputs to: {os.path.dirname(validation_predictions_path)}")
+
+        # Fit T on validation, compare on the same test samples.
+        calibration_dir = os.path.join("model", "calibration", best_name)
+        calibration = calibrate_and_compare(
+            validation_logits,
+            validation_labels.values.ravel(),
+            test_logits,
+            test_labels.values.ravel(),
+            calibration_dir,
+        )
+        save_temperature(
+            calibration["temperature"],
+            calibration_path_for(os.path.join("model", f"{best_name}.pkl")),
+            model=best_name,
+            fitted_on="validation",
+            input="log of predict_proba",
+        )
+        mlflow.log_metric("temperature", calibration["temperature"])
+        mlflow.log_metrics({
+            f"test_{kind}_{metric}": value
+            for kind in ("uncalibrated", "calibrated")
+            for metric, value in calibration[kind].items()
+        })
+        mlflow.log_artifacts(calibration_dir, artifact_path="calibration")
+        print(f"Temperature: {calibration['temperature']:.4f}")
+        print(f"Test calibration (uncalibrated): {calibration['uncalibrated']}")
+        print(f"Test calibration (temperature scaled): {calibration['calibrated']}")
 
         if args.confusion_matrix_path:
             predictions = (best_clf.predict_proba(test_data.values)[:, 1] >= 0.5).astype(int)

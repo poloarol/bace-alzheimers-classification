@@ -8,6 +8,9 @@ OUTPUT_DIR = DATASET_ROOT + r"\output"
 MODEL_DIR = "model"
 PYTHON = config["python"]
 
+PREDICTIONS_DIR = OUTPUT_DIR + r"\predictions"
+SELECTED_BASELINE = PREDICTIONS_DIR + r"\selected_baseline.json"
+
 BASELINE_MODELS = [
     "RandomForestClassifier",
     "LogisticRegression",
@@ -26,8 +29,12 @@ rule all:
     input:
         SPLIT_FILE,
         FINGERPRINT_FILES,
-        expand(OUTPUT_DIR + r"\{model}\confusion_matrix.png", model=BASELINE_MODELS),
+        SELECTED_BASELINE,
         expand(MODEL_DIR + r"\{model}.pth", model=config["gnn_models"]),
+        expand(
+            OUTPUT_DIR + r"\calibration\{model}\temperature.calibration.json",
+            model=config["gnn_models"],
+        ),
 
 
 rule split:
@@ -69,11 +76,12 @@ rule baselines:
         calibration_labels=FINGERPRINT_DIR + r"\calibration_labels.csv",
         test_labels=FINGERPRINT_DIR + r"\test_labels.csv"
     output:
-        expand(OUTPUT_DIR + r"\{model}\confusion_matrix.png", model=BASELINE_MODELS)
+        SELECTED_BASELINE
     shell:
         "{PYTHON} src\\baseline_model.py "
         "--data " + FINGERPRINT_DIR + " "
-        "--confusion-matrix-path " + OUTPUT_DIR
+        "--confusion-matrix-path " + OUTPUT_DIR + " "
+        "--predictions-dir " + PREDICTIONS_DIR
 
 
 rule train_gnn:
@@ -81,7 +89,9 @@ rule train_gnn:
         split=SPLIT_FILE,
         csv=RAW_CSV
     output:
-        MODEL_DIR + r"\{model}.pth"
+        MODEL_DIR + r"\{model}.pth",
+        PREDICTIONS_DIR + r"\{model}\validation_predictions.csv",
+        PREDICTIONS_DIR + r"\{model}\test_predictions.csv"
     params:
         epochs=config["epochs"],
         hidden_channels=config["hidden_channels"],
@@ -90,9 +100,22 @@ rule train_gnn:
     shell:
         "{PYTHON} src\\train.py "
         "--dataset_path " + DATASET_ROOT + " "
+        "--predictions-dir " + PREDICTIONS_DIR + " "
         "--model {wildcards.model} "
         "--epochs {params.epochs} "
         "--hidden-channels {params.hidden_channels} "
         "--learning-rate {params.learning_rate} "
         "--batch-size {params.batch_size} "
-        "--model-output {output}"
+        "--model-output {output[0]}"
+
+
+rule calibrate_gnn:
+    input:
+        validation=PREDICTIONS_DIR + r"\{model}\validation_predictions.csv",
+        test=PREDICTIONS_DIR + r"\{model}\test_predictions.csv"
+    output:
+        OUTPUT_DIR + r"\calibration\{model}\temperature.calibration.json"
+    shell:
+        "{PYTHON} src\\calibration.py "
+        "--validation {input.validation} --test {input.test} "
+        "--output-dir " + OUTPUT_DIR + r"\calibration\{wildcards.model}"

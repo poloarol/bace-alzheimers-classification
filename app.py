@@ -1,4 +1,5 @@
 import argparse
+import json
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Sequence
 REPOSITORY_ROOT = Path(__file__).resolve().parent
 SOURCE_DIRECTORY = REPOSITORY_ROOT / "src"
 GNN_MODELS = ("GCN", "GAT", "GATGraphTransformer")
+BEST_BASELINE = "best-baseline"
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,9 @@ class PipelinePaths:
     fingerprint_directory: Path
     output_directory: Path
 
+    @property
+    def predictions_directory(self) -> Path:
+        return self.output_directory / "predictions"
     @classmethod
     def from_dataset_root(cls, dataset_root: str) -> "PipelinePaths":
         root = Path(dataset_root).resolve()
@@ -125,6 +130,8 @@ class PipelineRunner:
                 str(self.paths.fingerprint_directory),
                 "--confusion-matrix-path",
                 str(self.paths.output_directory),
+                "--predictions-dir",
+                str(self.paths.predictions_directory),
                 *self._tracking_arguments("bace-baseline"),
             ],
         )
@@ -144,6 +151,8 @@ class PipelineRunner:
             [
                 "--dataset_path",
                 str(self.paths.dataset_root),
+                "--predictions-dir",
+                str(self.paths.predictions_directory),
                 "--model",
                 model,
                 "--epochs",
@@ -206,6 +215,58 @@ class PipelineRunner:
         if self.tracking_uri:
             arguments.extend(["--mlflow-tracking-uri", self.tracking_uri])
         self._run("inference.py", arguments)
+
+    def run_calibration(
+        self,
+        model_type: str | None,
+        validation_predictions: str | None,
+        test_predictions: str | None,
+        output_directory: str | None,
+        temperature_output: str | None,
+        bins: int,
+    ) -> None:
+        if model_type == BEST_BASELINE:
+            selection = self.paths.predictions_directory / "selected_baseline.json"
+            self._require_file(selection)
+            model_type = (
+                "<selected-baseline>"
+                if self.dry_run
+                else json.loads(selection.read_text(encoding="utf-8"))["model"]
+            )
+        if model_type:
+            model_directory = self.paths.predictions_directory / model_type
+            validation_predictions = validation_predictions or str(
+                model_directory / "validation_predictions.csv"
+            )
+            test_predictions = test_predictions or str(
+                model_directory / "test_predictions.csv"
+            )
+        if not (validation_predictions and test_predictions):
+            raise SystemExit(
+                "Provide --model-type, or both --validation-predictions and --test-predictions."
+            )
+        self._require_file(Path(validation_predictions))
+        self._require_file(Path(test_predictions))
+        output_directory = output_directory or str(
+            self.paths.output_directory / "calibration" / (model_type or "custom")
+        )
+        if temperature_output is None and model_type:
+            temperature_output = str(
+                Path(output_directory) / f"{model_type}.calibration.json"
+            )
+        arguments = [
+            "--validation",
+            validation_predictions,
+            "--test",
+            test_predictions,
+            "--output-dir",
+            output_directory,
+            "--bins",
+            str(bins),
+        ]
+        if temperature_output:
+            arguments.extend(["--temperature-output", temperature_output])
+        self._run("calibration.py", arguments)
 
     def run_complete_pipeline(
         self,
@@ -353,6 +414,32 @@ def build_parser() -> argparse.ArgumentParser:
     _add_inference_arguments(inference_parser, required=True)
     inference_parser.add_argument("--batch-size", type=int, default=32)
 
+    calibrate_parser = commands.add_parser(
+        "calibrate",
+        help="Fit a temperature on validation predictions and compare calibration on test.",
+    )
+    _add_common_arguments(calibrate_parser)
+    calibrate_parser.add_argument(
+        "--model-type",
+        help="Model whose saved predictions to calibrate: GCN, GAT, GATGraphTransformer, "
+        "a baseline class name, or 'best-baseline' for the selected baseline.",
+    )
+    calibrate_parser.add_argument(
+        "--validation-predictions",
+        help="Explicit validation CSV (label plus logit_0/logit_1 or probability). "
+        "Overrides the --model-type location.",
+    )
+    calibrate_parser.add_argument(
+        "--test-predictions",
+        help="Explicit test CSV with the same columns.",
+    )
+    calibrate_parser.add_argument(
+        "--output-dir",
+        help="Directory for the reliability diagram. Defaults to <dataset-root>/output/calibration/<model-type>.",
+    )
+    calibrate_parser.add_argument("--temperature-output", help="Path for the temperature JSON.")
+    calibrate_parser.add_argument("--bins", type=int, default=10)
+
     all_parser = commands.add_parser("all", help="Run split, fingerprints, baselines, and GNN training.")
     _add_common_arguments(all_parser)
     _add_split_arguments(all_parser)
@@ -411,6 +498,15 @@ def main() -> None:
             args.model_type,
             args.batch_size,
         )
+    elif args.command == "calibrate":
+        runner.run_calibration(
+            args.model_type,
+            args.validation_predictions,
+            args.test_predictions,
+            args.output_dir,
+            args.temperature_output,
+            args.bins,
+        )
     else:
         runner.run_complete_pipeline(
             args.model,
@@ -438,6 +534,10 @@ if __name__ == "__main__":
 
 # Run the full training pipeline
 # python app.py all
+
+# Fit a temperature on validation predictions and compare calibration on test
+# python app.py calibrate --model-type GCN
+# python app.py calibrate --model-type best-baseline
 
 # Run each stage independently
 # python app.py split
