@@ -1,3 +1,4 @@
+import csv
 import sys
 import tempfile
 import unittest
@@ -11,8 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from calibration import (  # noqa: E402
     apply_temperature,
     calibrate_and_compare,
+    _read_predictions,
+    class_counts,
     expected_calibration_error,
     fit_temperature,
+    load_calibration,
     load_temperature,
     save_temperature,
 )
@@ -45,11 +49,112 @@ class CalibrationTests(unittest.TestCase):
                 self.logits, self.labels, self.logits, self.labels, directory
             )
             self.assertTrue((Path(directory) / "reliability_diagram.png").exists())
+            self.assertEqual(result["n_test_samples"], len(self.labels))
+            with open(Path(directory) / "reliability_table.csv", encoding="utf-8") as handle:
+                table = list(csv.DictReader(handle))
+            self.assertEqual(len(table), 10)
+            for kind in ("uncalibrated", "calibrated"):
+                self.assertEqual(sum(int(r[f"{kind}_count"]) for r in table), len(self.labels))
             self.assertLess(result["calibrated"]["NLL"], result["uncalibrated"]["NLL"])
             path = Path(directory) / "m.calibration.json"
             save_temperature(result["temperature"], path)
             self.assertAlmostEqual(load_temperature(path), result["temperature"])
 
+
+    def test_fit_rejects_invalid_inputs(self):
+        good = self.logits
+        cases = {
+            "nan logits": (torch.full_like(good, float("nan")), self.labels),
+            "label out of range": (good, self.labels + 2),
+            "fractional labels": (good, self.labels.float() + 0.5),
+            "single class": (good, torch.zeros_like(self.labels)),
+            "length mismatch": (good, self.labels[:-1]),
+            "one column": (good[:, :1], self.labels),
+            "constant logits": (torch.zeros_like(good), self.labels),
+            "integer logits": (good.long(), self.labels),
+        }
+        for name, (logits, labels) in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                fit_temperature(logits, labels)
+        with self.assertRaises(ValueError):
+            fit_temperature(good, self.labels, max_iter=0)
+
+    def test_apply_rejects_bad_temperature(self):
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                apply_temperature(self.logits, bad)
+
+    def test_apply_validates_logits_and_handles_grad(self):
+        for name, bad in {
+            "three columns": torch.zeros(4, 3),
+            "one dim": torch.zeros(4),
+            "nan": torch.full((4, 2), float("nan")),
+            "inf": torch.full((4, 2), float("inf")),
+        }.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                apply_temperature(bad, 1.0)
+        with_grad = self.logits.clone().requires_grad_(True)
+        probabilities = apply_temperature(with_grad, 2.0)
+        self.assertEqual(probabilities.shape, (self.logits.shape[0],))
+
+    def test_probabilities_to_logits_validation(self):
+        from calibration import probabilities_to_logits
+
+        good = np.array([[0.2, 0.8], [0.5, 0.5]])
+        logits = probabilities_to_logits(good)
+        self.assertEqual(tuple(logits.shape), (2, 2))
+        # softmax of the log-probabilities recovers the input
+        self.assertTrue(np.allclose(torch.softmax(logits, dim=1).numpy(), good))
+
+        cases = {
+            "empty": np.empty((0, 2)),
+            "one dim": np.array([0.2, 0.8]),
+            "three columns": np.full((2, 3), 1 / 3),
+            "nan": np.array([[np.nan, 0.5]]),
+            "inf": np.array([[np.inf, 0.0]]),
+            "negative": np.array([[-0.1, 1.1]]),
+            "above one": np.array([[1.2, -0.2]]),
+            "rows not summing to one": np.array([[0.3, 0.3]]),
+        }
+        for name, bad in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                probabilities_to_logits(bad)
+
+    def test_binary_metrics_validate_inputs(self):
+        from calibration import brier_score, negative_log_likelihood
+
+        labels = np.array([0, 1, 1, 0])
+        probabilities = np.array([0.1, 0.9, 0.8, 0.3])
+        for metric in (brier_score, negative_log_likelihood, expected_calibration_error):
+            cases = {
+                "length mismatch": (labels, probabilities[:-1]),
+                "empty": (np.array([]), np.array([])),
+                "nan probability": (labels, np.array([0.1, np.nan, 0.8, 0.3])),
+                "probability above one": (labels, np.array([0.1, 1.5, 0.8, 0.3])),
+                "negative probability": (labels, np.array([-0.1, 0.9, 0.8, 0.3])),
+                "non-binary labels": (np.array([0, 2, 1, 0]), probabilities),
+                "fractional labels": (np.array([0, 0.5, 1, 0]), probabilities),
+                "string labels": (np.array(["a", "b", "a", "b"]), probabilities),
+                "2-D probabilities": (labels, np.stack([1 - probabilities, probabilities], axis=1)),
+            }
+            for name, (y, p) in cases.items():
+                with self.subTest(metric=metric.__name__, case=name), self.assertRaises(ValueError):
+                    metric(y, p)
+
+    def test_binary_metric_values(self):
+        from calibration import brier_score, negative_log_likelihood
+
+        labels = np.array([0, 1])
+        probabilities = np.array([0.2, 0.6])
+        self.assertAlmostEqual(brier_score(labels, probabilities), (0.2**2 + 0.4**2) / 2)
+        self.assertAlmostEqual(
+            negative_log_likelihood(labels, probabilities),
+            -(np.log(0.8) + np.log(0.6)) / 2,
+        )
+        # Confident wrong predictions stay finite thanks to clipping.
+        self.assertTrue(np.isfinite(negative_log_likelihood(np.array([1]), np.array([0.0]))))
+        with self.assertRaises(ValueError):
+            expected_calibration_error(labels, probabilities, n_bins=0)
 
     def test_saved_predictions_round_trip_through_cli_reader(self):
         from calibration import _read_predictions, save_predictions
@@ -60,6 +165,45 @@ class CalibrationTests(unittest.TestCase):
             logits, labels = _read_predictions(str(path))
             self.assertTrue(torch.allclose(logits, self.logits.double()))
             self.assertEqual(labels.tolist(), self.labels.tolist())
+
+
+class CalibrationArtifactTests(unittest.TestCase):
+    def test_save_creates_parent_and_records_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "a" / "b" / "GCN.calibration.json"
+            save_temperature(1.5, path, model="GCN", checkpoint="GCN.pth")
+            payload = load_calibration(path, expected_model="GCN")
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertIn("BACE-1 inhibitor", payload["positive_class"])
+            self.assertEqual(payload["checkpoint"], "GCN.pth")
+            self.assertEqual(load_temperature(path), 1.5)
+
+    def test_rejects_bad_temperatures_and_model_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "t.json"
+            for bad in (0.0, -1.0, float("nan"), float("inf")):
+                with self.assertRaises(ValueError):
+                    save_temperature(bad, path)
+            save_temperature(2.0, path, model="GCN")
+            with self.assertRaises(ValueError):
+                load_temperature(path, expected_model="GAT")
+            path.write_text('{"temperature": -1}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_temperature(path)
+
+    def test_csv_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "p.csv"
+            path.write_text("label,probability\n0,0.2\n2,0.4\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _read_predictions(str(path))
+            path.write_text("label,logit_0,logit_1\n0,nan,1.0\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _read_predictions(str(path))
+            path.write_text("label,probability\n0,0.2\n1,0.9\n", encoding="utf-8")
+            logits, labels = _read_predictions(str(path))
+            self.assertEqual(tuple(logits.shape), (2, 2))
+            self.assertEqual(class_counts(labels), {"n": 2, "class_0": 1, "class_1": 1})
 
 
 if __name__ == "__main__":

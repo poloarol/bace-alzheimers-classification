@@ -12,6 +12,7 @@ import torch
 from sklearn.metrics import accuracy_score, confusion_matrix
 from torch_geometric.loader import DataLoader
 
+from calibration import apply_temperature, load_temperature, probabilities_to_logits
 from dataset import MoleculeDataset
 from mlflow_utils import DEFAULT_TRACKING_URI
 
@@ -62,7 +63,13 @@ def save_confusion_matrix(
 def run_sklearn_inference(
     model_uri: str,
     fingerprint_dir: str,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_logits: bool = False,
+):
+    """Return (labels, predictions), or (labels, predictions, logits) if return_logits.
+
+    sklearn models have no logits, so the returned scores are log-probabilities from
+    predict_proba, which equal logits up to a constant shift for two classes.
+    """
     test_data_path = Path(fingerprint_dir) / "test_fingerprints.csv"
     test_labels_path = Path(fingerprint_dir) / "test_labels.csv"
     features = pd.read_csv(test_data_path)
@@ -70,14 +77,19 @@ def run_sklearn_inference(
 
     model = mlflow.sklearn.load_model(model_uri)
     predictions = np.asarray(model.predict(features), dtype=int)
-    return labels, predictions
+    if not return_logits:
+        return labels, predictions
+    logits = probabilities_to_logits(model.predict_proba(features))
+    return labels, predictions, logits
 
 
 def run_gnn_inference(
     model_uri: str,
     dataset_root: str,
     batch_size: int,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_logits: bool = False,
+):
+    """Return (labels, predictions), or (labels, predictions, raw logits) if return_logits."""
     dataset = MoleculeDataset(
         root=dataset_root,
         filename="bace_processed.csv",
@@ -93,6 +105,7 @@ def run_gnn_inference(
 
     labels = []
     predictions = []
+    logits = []
     with torch.inference_mode():
         for batch in DataLoader(dataset, batch_size=batch_size, shuffle=False):
             batch = batch.to(device)
@@ -104,8 +117,40 @@ def run_gnn_inference(
             )
             predictions.extend(output.argmax(dim=1).cpu().tolist())
             labels.extend(batch.y.view(-1).cpu().tolist())
+            logits.append(output.cpu())
 
-    return np.asarray(labels, dtype=int), np.asarray(predictions, dtype=int)
+    labels = np.asarray(labels, dtype=int)
+    predictions = np.asarray(predictions, dtype=int)
+    if not return_logits:
+        return labels, predictions
+    return labels, predictions, torch.cat(logits)
+
+
+def save_calibrated_predictions(
+    logits,
+    labels: np.ndarray,
+    calibration_file: str,
+    model_type: str,
+    output_directory: Path,
+) -> Path:
+    """Apply the stored temperature on the logit scale and write per-molecule probabilities.
+
+    The probability column is the calibrated probability of class 1 (BACE-1 inhibitor).
+    It is not a validated estimate of prospective experimental success.
+    """
+    temperature = load_temperature(calibration_file, expected_model=model_type)
+    logits = torch.as_tensor(logits, dtype=torch.float64)
+    uncalibrated = apply_temperature(logits, 1.0)[:, 1]
+    calibrated = apply_temperature(logits, temperature)[:, 1]
+    path = output_directory / "calibrated_predictions.csv"
+    pd.DataFrame({
+        "label": labels,
+        "uncalibrated_probability": uncalibrated,
+        "calibrated_probability": calibrated,
+        "predicted_class": (calibrated >= 0.5).astype(int),
+    }).to_csv(path, index=False)
+    print(f"Temperature: {temperature:.4f} (from {calibration_file})")
+    return path
 
 
 def main() -> None:
@@ -152,32 +197,49 @@ def main() -> None:
         default=DEFAULT_TRACKING_URI,
         help="MLflow tracking URI used to resolve the model URI.",
     )
+    parser.add_argument(
+        "--calibration-file",
+        help="Calibration JSON written by calibration.py for this exact model. "
+        "When given, calibrated inhibitor probabilities are also saved.",
+    )
     args = parser.parse_args()
 
     mlflow.set_tracking_uri(args.mlflow_tracking_uri)
     output_directory = _output_directory(args.output_dir, args.model_type)
+    want_logits = bool(args.calibration_file)
 
+    logits = None
     if args.model_flavor == "sklearn":
         if not args.fingerprint_dir:
             parser.error("--fingerprint-dir is required for sklearn inference.")
-        labels, predictions = run_sklearn_inference(
+        result = run_sklearn_inference(
             args.model_uri,
             args.fingerprint_dir,
+            return_logits=want_logits,
         )
     else:
         if not args.dataset_root:
             parser.error("--dataset-root is required for pytorch inference.")
-        labels, predictions = run_gnn_inference(
+        result = run_gnn_inference(
             args.model_uri,
             args.dataset_root,
             args.batch_size,
+            return_logits=want_logits,
         )
+    labels, predictions = result[0], result[1]
+    if want_logits:
+        logits = result[2]
 
     matrix = save_confusion_matrix(labels, predictions, output_directory)
     accuracy = accuracy_score(labels, predictions)
     print(f"Test accuracy: {accuracy:.4f}")
     print(f"Saved confusion matrix to: {output_directory}")
     print(matrix)
+    if logits is not None:
+        path = save_calibrated_predictions(
+            logits, labels, args.calibration_file, args.model_type, output_directory
+        )
+        print(f"Saved calibrated probabilities to: {path}")
 
 
 if __name__ == "__main__":

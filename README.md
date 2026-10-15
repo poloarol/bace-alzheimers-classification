@@ -327,12 +327,13 @@ Use `--hidden-channels` and `--learning-rate` to change model settings.
 
 Calibration uses temperature scaling: a single positive temperature `T` is fitted on the **validation** logits and labels, and probabilities become `softmax(logits / T)`. Argmax predictions, ROC-AUC, and PR-AUC are unchanged; only probability quality improves. The test set is never used to fit `T`.
 
-Calibration runs automatically:
+Calibration is a separate downstream stage: training writes only the labelled raw logits, and `src/calibration.py` is the single place that fits `T`, evaluates it on test, and writes the calibration artifact. This lets you recalibrate without retraining.
 
-- `python app.py gnn ...` fits `T` on the trained model's validation logits.
-- `python app.py baseline` fits `T` for the model selected by validation PR-AUC, using the log of `predict_proba` as logits.
+- `python app.py gnn ...` trains, writes the prediction CSVs, then runs calibration for that model.
+- `python app.py baseline` selects the baseline by validation PR-AUC, writes its prediction CSVs (log of `predict_proba` as logits; the CSV `probability` column means P(class 1)), then calibrates the selected model.
+- Snakemake runs `calibrate_gnn` after each `train_gnn`.
 
-Each run compares uncalibrated and temperature-scaled probabilities on the same test samples using Brier score, negative log-likelihood (NLL), and expected calibration error (ECE), and logs them to MLflow (`test_uncalibrated_*`, `test_calibrated_*`, `temperature`) together with a reliability diagram.
+Each calibration compares uncalibrated and temperature-scaled probabilities on the same test samples using Brier score, negative log-likelihood (NLL), and expected calibration error (ECE). Do not select models, temperatures, or thresholds from these test metrics. Validation also drives checkpoint selection, so the temperature fit is not fully independent of it. The calibration split is untouched, so it stays available for conformal prediction (a different method with its own exchangeability assumptions).
 
 Outputs:
 
@@ -340,20 +341,23 @@ Outputs:
 data/MoleculeNet/bace/output/predictions/<ModelName>/validation_predictions.csv   # label, logit_0, logit_1
 data/MoleculeNet/bace/output/predictions/<ModelName>/test_predictions.csv
 data/MoleculeNet/bace/output/predictions/selected_baseline.json                   # baseline only
-model/<ModelName>.calibration.json                                                # fitted temperature for reproducible inference
-model/calibration/<ModelName>/reliability_diagram.png
+model/<ModelName>.calibration.json                                                # canonical artifact: T, model, checkpoint, class convention, counts, before/after metrics
+data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_diagram.png
+data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_table.csv
 ```
 
-The prediction CSVs are the inputs to the standalone calibration command, so a model can be re-calibrated (for example with a different bin count) without retraining. After training, run:
+The JSON has a `schema_version`, records `positive_class` (class 1 = BACE-1 inhibitor), and loading it with `expected_model` refuses a temperature fitted for a different model. MLflow no longer receives calibration metrics; the JSON is the record.
+
+To recalibrate (for example with a different bin count) without retraining:
 
 ```bash
 python app.py calibrate --model-type GCN            # or GAT, GATGraphTransformer
 python app.py calibrate --model-type best-baseline  # the baseline selected by validation PR-AUC
 ```
 
-This prints `T` and the before/after Brier, NLL, and ECE, and writes `reliability_diagram.png` and `<model-type>.calibration.json` to `data/MoleculeNet/bace/output/calibration/<model-type>/`. Use `--output-dir` and `--temperature-output` to change the locations and `--bins` to change the number of bins (default 10).
+This prints sample and class counts, `T`, and the before/after Brier, NLL, and ECE. `--bins` must be a positive integer (default 10). Use `--output-dir` and `--temperature-output` to change locations.
 
-To calibrate arbitrary predictions instead, pass CSVs with a `label` column plus either `logit_0`/`logit_1` or `probability` (positive class):
+To calibrate arbitrary predictions instead, pass CSVs with a `label` column (0/1) plus either `logit_0`/`logit_1` or `probability`, the probability of class 1 (not an arbitrary confidence score). Inputs are checked for finite values and binary labels:
 
 ```bash
 python app.py calibrate \
@@ -361,7 +365,9 @@ python app.py calibrate \
   --test-predictions test_preds.csv
 ```
 
-The Snakemake workflow also runs `calibrate_gnn` for every configured GNN. In Python, load a saved temperature with `calibration.load_temperature` and apply it with `calibration.apply_temperature`.
+**Calibrated inference.** `app.py inference` automatically passes `model/<model-type>.calibration.json` to `src/inference.py` when it exists (or pass `--calibration-file`). The model name must match the artifact. Scaling is applied to logits (log-probabilities for sklearn), never by dividing probabilities by `T`, and `calibrated_predictions.csv` is written next to the confusion matrix. A calibrated probability is not a validated estimate of prospective experimental success.
+
+**Interpreting the results.** The test split holds roughly 150 molecules, so a 10-bin reliability diagram has sparsely populated bins that can shift with one or two molecules. The diagram therefore includes a histogram of samples per bin, and `reliability_table.csv` lists per-bin counts, mean probabilities, and observed fractions for both probability sets. Ten bins is a fixed baseline; the bin count should not be tuned to improve the plot. Read Brier score and NLL alongside ECE, and do not treat a small ECE difference as a meaningful improvement. Bootstrap intervals are not provided; ordinary resampling would also ignore scaffold-level dependence between molecules. Brier score is the binary positive-class version (`mean((p - y)^2)`), half the multiclass sum-over-classes convention.
 
 ### 5. Run inference
 

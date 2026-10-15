@@ -24,6 +24,11 @@ class PipelinePaths:
     @property
     def predictions_directory(self) -> Path:
         return self.output_directory / "predictions"
+
+    @property
+    def model_directory(self) -> Path:
+        return REPOSITORY_ROOT / "model"
+
     @classmethod
     def from_dataset_root(cls, dataset_root: str) -> "PipelinePaths":
         root = Path(dataset_root).resolve()
@@ -135,6 +140,7 @@ class PipelineRunner:
                 *self._tracking_arguments("bace-baseline"),
             ],
         )
+        self.run_calibration(BEST_BASELINE, None, None, None, None, 10)
 
     def run_gnn_training(
         self,
@@ -155,6 +161,8 @@ class PipelineRunner:
                 str(self.paths.predictions_directory),
                 "--model",
                 model,
+                "--model-output",
+                str(self.paths.model_directory / f"{model}.pth"),
                 "--epochs",
                 str(epochs),
                 "--hidden-channels",
@@ -166,6 +174,7 @@ class PipelineRunner:
                 *self._tracking_arguments("bace-gnn"),
             ],
         )
+        self.run_calibration(model, None, None, None, None, 10)
 
     def run_all_gnn_training(
         self,
@@ -212,6 +221,9 @@ class PipelineRunner:
                 "--dataset-root",
                 str(self.paths.dataset_root),
             ])
+        calibration_file = self.paths.model_directory / f"{model_type}.calibration.json"
+        if calibration_file.is_file():
+            arguments.extend(["--calibration-file", str(calibration_file)])
         if self.tracking_uri:
             arguments.extend(["--mlflow-tracking-uri", self.tracking_uri])
         self._run("inference.py", arguments)
@@ -251,9 +263,8 @@ class PipelineRunner:
             self.paths.output_directory / "calibration" / (model_type or "custom")
         )
         if temperature_output is None and model_type:
-            temperature_output = str(
-                Path(output_directory) / f"{model_type}.calibration.json"
-            )
+            temperature_output = str(self.paths.model_directory / f"{model_type}.calibration.json")
+        checkpoint = self._checkpoint_for(model_type)
         arguments = [
             "--validation",
             validation_predictions,
@@ -264,9 +275,20 @@ class PipelineRunner:
             "--bins",
             str(bins),
         ]
+        if model_type:
+            arguments.extend(["--model-name", model_type])
+        if checkpoint:
+            arguments.extend(["--checkpoint", checkpoint])
         if temperature_output:
             arguments.extend(["--temperature-output", temperature_output])
         self._run("calibration.py", arguments)
+
+    def _checkpoint_for(self, model_type: str | None) -> str | None:
+        if not model_type:
+            return None
+        if model_type in GNN_MODELS:
+            return str(self.paths.model_directory / f"{model_type}.pth")
+        return f"mlflow selected baseline: {model_type}"
 
     def run_complete_pipeline(
         self,
@@ -295,16 +317,10 @@ class PipelineRunner:
         self.run_fingerprints(radius, n_bits)
         self.run_baselines()
         if include_gnn:
-            if all_models:
-                self.run_all_gnn_training(
-                    epochs,
-                    hidden_channels,
-                    learning_rate,
-                    batch_size,
-                )
-            else:
+            models = GNN_MODELS if all_models else (model,)
+            for gnn_model in models:
                 self.run_gnn_training(
-                    model,
+                    gnn_model,
                     epochs,
                     hidden_channels,
                     learning_rate,
@@ -364,6 +380,16 @@ def _add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--hidden-channels", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--batch-size", type=int, default=32)
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer.")
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer.")
+    return number
 
 
 def _add_inference_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
@@ -437,8 +463,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         help="Directory for the reliability diagram. Defaults to <dataset-root>/output/calibration/<model-type>.",
     )
-    calibrate_parser.add_argument("--temperature-output", help="Path for the temperature JSON.")
-    calibrate_parser.add_argument("--bins", type=int, default=10)
+    calibrate_parser.add_argument("--temperature-output", help="Path for the calibration JSON. Defaults to model/<model-type>.calibration.json.")
+    calibrate_parser.add_argument("--bins", type=_positive_int, default=10)
 
     all_parser = commands.add_parser("all", help="Run split, fingerprints, baselines, and GNN training.")
     _add_common_arguments(all_parser)

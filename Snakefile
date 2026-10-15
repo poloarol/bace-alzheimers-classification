@@ -1,28 +1,28 @@
+import os
+
 configfile: "config.yaml"
 
 DATASET_ROOT = config["dataset_root"]
-RAW_CSV = DATASET_ROOT + r"\raw\bace_processed.csv"
-SPLIT_FILE = DATASET_ROOT + r"\clean\train_test_split.npz"
-FINGERPRINT_DIR = DATASET_ROOT + r"\fingerprints"
-OUTPUT_DIR = DATASET_ROOT + r"\output"
+RAW_CSV = os.path.join(DATASET_ROOT, "raw", "bace_processed.csv")
+SPLIT_FILE = os.path.join(DATASET_ROOT, "clean", "train_test_split.npz")
+FINGERPRINT_DIR = os.path.join(DATASET_ROOT, "fingerprints")
+OUTPUT_DIR = os.path.join(DATASET_ROOT, "output")
 MODEL_DIR = "model"
 PYTHON = config["python"]
 
-PREDICTIONS_DIR = OUTPUT_DIR + r"\predictions"
-SELECTED_BASELINE = PREDICTIONS_DIR + r"\selected_baseline.json"
+PREDICTIONS_DIR = os.path.join(OUTPUT_DIR, "predictions")
+SELECTED_BASELINE = os.path.join(PREDICTIONS_DIR, "selected_baseline.json")
+# Canonical calibration artifact, stored next to the model: model/<model>.calibration.json
+CALIBRATION_JSON = os.path.join(MODEL_DIR, "{model}.calibration.json")
+CALIBRATION_DIR = os.path.join(OUTPUT_DIR, "calibration", "{model}")
 
-BASELINE_MODELS = [
-    "RandomForestClassifier",
-    "LogisticRegression",
-    "GradientBoostingClassifier",
-]
+SPLITS = ["train", "validation", "calibration", "test"]
 FINGERPRINT_FILES = [
-    FINGERPRINT_DIR + rf"\{split}_fingerprints.csv"
-    for split in ["train", "validation", "calibration", "test"]
+    os.path.join(FINGERPRINT_DIR, f"{split}_fingerprints.csv") for split in SPLITS
 ] + [
-    FINGERPRINT_DIR + rf"\{split}_labels.csv"
-    for split in ["train", "validation", "calibration", "test"]
+    os.path.join(FINGERPRINT_DIR, f"{split}_labels.csv") for split in SPLITS
 ]
+SCRIPT = lambda name: os.path.join("src", name)
 
 
 rule all:
@@ -30,11 +30,8 @@ rule all:
         SPLIT_FILE,
         FINGERPRINT_FILES,
         SELECTED_BASELINE,
-        expand(MODEL_DIR + r"\{model}.pth", model=config["gnn_models"]),
-        expand(
-            OUTPUT_DIR + r"\calibration\{model}\temperature.calibration.json",
-            model=config["gnn_models"],
-        ),
+        expand(os.path.join(MODEL_DIR, "{model}.pth"), model=config["gnn_models"]),
+        expand(CALIBRATION_JSON, model=config["gnn_models"]),
 
 
 rule split:
@@ -43,7 +40,7 @@ rule split:
     output:
         SPLIT_FILE
     shell:
-        "{PYTHON} src\\stratified_scaffold_split.py "
+        "{PYTHON} " + SCRIPT("stratified_scaffold_split.py") + " "
         "--input {input} --output {output} "
         "--train_size {config[train_size]} "
         "--validation_size {config[validation_size]} "
@@ -58,7 +55,7 @@ rule fingerprints:
     output:
         FINGERPRINT_FILES
     shell:
-        "{PYTHON} src\\build_fingerprints.py "
+        "{PYTHON} " + SCRIPT("build_fingerprints.py") + " "
         "--input_csv {input.csv} "
         "--train_test_split_npz {input.split} "
         "--output_dir " + FINGERPRINT_DIR + " "
@@ -67,18 +64,11 @@ rule fingerprints:
 
 rule baselines:
     input:
-        train=FINGERPRINT_DIR + r"\train_fingerprints.csv",
-        validation=FINGERPRINT_DIR + r"\validation_fingerprints.csv",
-        calibration=FINGERPRINT_DIR + r"\calibration_fingerprints.csv",
-        test=FINGERPRINT_DIR + r"\test_fingerprints.csv",
-        train_labels=FINGERPRINT_DIR + r"\train_labels.csv",
-        validation_labels=FINGERPRINT_DIR + r"\validation_labels.csv",
-        calibration_labels=FINGERPRINT_DIR + r"\calibration_labels.csv",
-        test_labels=FINGERPRINT_DIR + r"\test_labels.csv"
+        FINGERPRINT_FILES
     output:
         SELECTED_BASELINE
     shell:
-        "{PYTHON} src\\baseline_model.py "
+        "{PYTHON} " + SCRIPT("baseline_model.py") + " "
         "--data " + FINGERPRINT_DIR + " "
         "--confusion-matrix-path " + OUTPUT_DIR + " "
         "--predictions-dir " + PREDICTIONS_DIR
@@ -89,16 +79,16 @@ rule train_gnn:
         split=SPLIT_FILE,
         csv=RAW_CSV
     output:
-        MODEL_DIR + r"\{model}.pth",
-        PREDICTIONS_DIR + r"\{model}\validation_predictions.csv",
-        PREDICTIONS_DIR + r"\{model}\test_predictions.csv"
+        os.path.join(MODEL_DIR, "{model}.pth"),
+        os.path.join(PREDICTIONS_DIR, "{model}", "validation_predictions.csv"),
+        os.path.join(PREDICTIONS_DIR, "{model}", "test_predictions.csv")
     params:
         epochs=config["epochs"],
         hidden_channels=config["hidden_channels"],
         learning_rate=config["learning_rate"],
         batch_size=config["batch_size"]
     shell:
-        "{PYTHON} src\\train.py "
+        "{PYTHON} " + SCRIPT("train.py") + " "
         "--dataset_path " + DATASET_ROOT + " "
         "--predictions-dir " + PREDICTIONS_DIR + " "
         "--model {wildcards.model} "
@@ -109,13 +99,18 @@ rule train_gnn:
         "--model-output {output[0]}"
 
 
+# Single authoritative calibration step: fits T on validation logits, evaluates on test.
 rule calibrate_gnn:
     input:
-        validation=PREDICTIONS_DIR + r"\{model}\validation_predictions.csv",
-        test=PREDICTIONS_DIR + r"\{model}\test_predictions.csv"
+        checkpoint=os.path.join(MODEL_DIR, "{model}.pth"),
+        validation=os.path.join(PREDICTIONS_DIR, "{model}", "validation_predictions.csv"),
+        test=os.path.join(PREDICTIONS_DIR, "{model}", "test_predictions.csv")
     output:
-        OUTPUT_DIR + r"\calibration\{model}\temperature.calibration.json"
+        CALIBRATION_JSON
+    params:
+        output_dir=CALIBRATION_DIR
     shell:
-        "{PYTHON} src\\calibration.py "
+        "{PYTHON} " + SCRIPT("calibration.py") + " "
         "--validation {input.validation} --test {input.test} "
-        "--output-dir " + OUTPUT_DIR + r"\calibration\{wildcards.model}"
+        "--model-name {wildcards.model} --checkpoint {input.checkpoint} "
+        "--output-dir {params.output_dir} --temperature-output {output}"

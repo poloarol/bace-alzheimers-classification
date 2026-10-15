@@ -18,13 +18,7 @@ from tqdm import trange
 
 
 from model import build_model
-from calibration import (
-    calibrate_and_compare,
-    calibration_path_for,
-    prediction_paths,
-    save_predictions,
-    save_temperature,
-)
+from calibration import prediction_paths, save_predictions
 from dataset import MoleculeDataset
 from mlflow_utils import configure_mlflow, log_parameters
 
@@ -238,9 +232,6 @@ if __name__ == "__main__":
         raise RuntimeError("Training ended without saving a model checkpoint.")
 
     model.load_state_dict(best_model_state)
-            
-
-    model.load_state_dict(best_model_state)
     mlflow.log_metric("best_validation_accuracy", best_val_acc)
     final_calibration_metrics, final_test_metrics = (
         evaluate_after_model_selection(
@@ -257,9 +248,10 @@ if __name__ == "__main__":
     print(f"Final calibration metrics: {final_calibration_metrics}")
     print(f"Final test metrics: {final_test_metrics}")
 
+    # Calibration is a separate downstream stage (src/calibration.py); training only
+    # writes the labelled raw logits it consumes.
     validation_labels, validation_logits = collect_predictions(model, validation_loader)
     test_labels, test_logits = collect_predictions(model, test_loader)
-    calibration_dir = os.path.join("model", "calibration", model_class_name)
     predictions_dir = args.predictions_dir or os.path.join(args.dataset_path, "output", "predictions")
     validation_predictions_path, test_predictions_path = prediction_paths(
         predictions_dir, args.model
@@ -268,20 +260,6 @@ if __name__ == "__main__":
     save_predictions(test_labels, test_logits, test_predictions_path)
     mlflow.log_artifacts(os.path.dirname(validation_predictions_path), artifact_path="predictions")
     print(f"Saved calibration inputs to: {os.path.dirname(validation_predictions_path)}")
-    calibration = calibrate_and_compare(
-        validation_logits, validation_labels, test_logits, test_labels, calibration_dir
-    )
-    temperature = calibration["temperature"]
-    mlflow.log_metric("temperature", temperature)
-    mlflow.log_metrics({
-        f"test_{kind}_{metric}": value
-        for kind in ("uncalibrated", "calibrated")
-        for metric, value in calibration[kind].items()
-    })
-    mlflow.log_artifacts(calibration_dir, artifact_path="calibration")
-    print(f"Temperature: {temperature:.4f}")
-    print(f"Test calibration (uncalibrated): {calibration['uncalibrated']}")
-    print(f"Test calibration (temperature scaled): {calibration['calibrated']}")
     mlflow.pytorch.log_model(
         model,
         f"{args.model}-Model",
@@ -294,15 +272,10 @@ if __name__ == "__main__":
     )
     os.makedirs(os.path.dirname(model_output), exist_ok=True)
     torch.save(model.state_dict(), model_output)
-    save_temperature(
-        temperature,
-        calibration_path_for(model_output),
-        model=args.model,
-        fitted_on="validation",
-    )
         
 # Example usage:
 # python src/train.py --epochs 500 --hidden-channels 64 --dataset_path data/ --learning-rate 0.01
+# Then calibrate: python app.py calibrate --model-type GCN
 
 
 # python src/train.py --dataset_path data/MoleculeNet/bace

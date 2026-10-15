@@ -16,12 +16,9 @@ from sklearn.base import clone
 
 from mlflow_utils import configure_mlflow, log_parameters
 from calibration import (
-    calibrate_and_compare,
-    calibration_path_for,
     probabilities_to_logits,
     prediction_paths,
     save_predictions,
-    save_temperature,
 )
 
 seed: int = 42
@@ -181,38 +178,13 @@ if __name__ == "__main__":
         validation_predictions_path, test_predictions_path = prediction_paths(predictions_dir, best_name)
         save_predictions(validation_labels.values.ravel(), validation_logits, validation_predictions_path)
         save_predictions(test_labels.values.ravel(), test_logits, test_predictions_path)
+        Path(predictions_dir).mkdir(parents=True, exist_ok=True)
         Path(predictions_dir, "selected_baseline.json").write_text(
-            json.dumps({"model": best_name}), encoding="utf-8"
+            json.dumps({"model": best_name, "mlflow_run_id": best_run_id}), encoding="utf-8"
         )
         mlflow.log_artifacts(os.path.dirname(validation_predictions_path), artifact_path="predictions")
         print(f"Saved calibration inputs to: {os.path.dirname(validation_predictions_path)}")
-
-        # Fit T on validation, compare on the same test samples.
-        calibration_dir = os.path.join("model", "calibration", best_name)
-        calibration = calibrate_and_compare(
-            validation_logits,
-            validation_labels.values.ravel(),
-            test_logits,
-            test_labels.values.ravel(),
-            calibration_dir,
-        )
-        save_temperature(
-            calibration["temperature"],
-            calibration_path_for(os.path.join("model", f"{best_name}.pkl")),
-            model=best_name,
-            fitted_on="validation",
-            input="log of predict_proba",
-        )
-        mlflow.log_metric("temperature", calibration["temperature"])
-        mlflow.log_metrics({
-            f"test_{kind}_{metric}": value
-            for kind in ("uncalibrated", "calibrated")
-            for metric, value in calibration[kind].items()
-        })
-        mlflow.log_artifacts(calibration_dir, artifact_path="calibration")
-        print(f"Temperature: {calibration['temperature']:.4f}")
-        print(f"Test calibration (uncalibrated): {calibration['uncalibrated']}")
-        print(f"Test calibration (temperature scaled): {calibration['calibrated']}")
+        print("Next: python app.py calibrate --model-type best-baseline")
 
         if args.confusion_matrix_path:
             predictions = (best_clf.predict_proba(test_data.values)[:, 1] >= 0.5).astype(int)
