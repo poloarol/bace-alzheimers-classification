@@ -44,22 +44,32 @@ if __name__ == "__main__":
     # Load the input CSV file
     df = pd.read_csv(args.input_csv)
     
-    # Load the train/test split
     split = np.load(args.train_test_split_npz)
-    train_idx = split["train_idx"]
-    test_idx = split["test_idx"]
-    
-    train_fp = np.array([build_morgan_fingerprint(smiles, radius=args.radius, n_bits=args.n_bits) for smiles in df["mol"].iloc[train_idx]])
-    test_fp = np.array([build_morgan_fingerprint(smiles, radius=args.radius, n_bits=args.n_bits) for smiles in df["mol"].iloc[test_idx]])
-    
-    train_labels = df["Class"].iloc[train_idx].values
-    test_labels = df["Class"].iloc[test_idx].values
+    split_indices = {
+        split_name: split[f"{split_name}_idx"]
+        for split_name in ("train", "validation", "calibration", "test")
+    }
+    fingerprints = {
+        split_name: np.array([
+            build_morgan_fingerprint(
+                smiles,
+                radius=args.radius,
+                n_bits=args.n_bits,
+            )
+            for smiles in df["mol"].iloc[indices]
+        ])
+        for split_name, indices in split_indices.items()
+    }
+    labels = {
+        split_name: df["Class"].iloc[indices].values
+        for split_name, indices in split_indices.items()
+    }
 
     output_files = [
-        os.path.join(args.output_dir, "train_fingerprints.csv"),
-        os.path.join(args.output_dir, "test_fingerprints.csv"),
-        os.path.join(args.output_dir, "train_labels.csv"),
-        os.path.join(args.output_dir, "test_labels.csv"),
+        *(os.path.join(args.output_dir, f"{split_name}_fingerprints.csv")
+          for split_name in split_indices),
+        *(os.path.join(args.output_dir, f"{split_name}_labels.csv")
+          for split_name in split_indices),
     ]
     with mlflow.start_run(run_name="build-morgan-fingerprints"):
         log_parameters({
@@ -68,13 +78,16 @@ if __name__ == "__main__":
             "output_dir": args.output_dir,
             "radius": args.radius,
             "n_bits": args.n_bits,
-            "train_samples": len(train_fp),
-            "test_samples": len(test_fp),
+            **{
+                f"{split_name}_samples": len(indices)
+                for split_name, indices in split_indices.items()
+            },
         })
-        for array, output_file in zip(
-            (train_fp, test_fp, train_labels, test_labels),
-            output_files,
-        ):
+        arrays = [
+            *(fingerprints[split_name] for split_name in split_indices),
+            *(labels[split_name] for split_name in split_indices),
+        ]
+        for array, output_file in zip(arrays, output_files):
             pd.DataFrame(array).to_csv(output_file, index=False)
         mlflow.log_artifacts(args.output_dir, artifact_path="fingerprints")
 

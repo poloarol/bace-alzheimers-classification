@@ -14,23 +14,26 @@ from mlflow_utils import configure_mlflow, log_parameters
 def stratified_scaffold_split(
     smiles,
     labels,
-    train_size=0.8,
-    test_size=0.2,
+    train_size=0.7,
+    test_size=0.1,
     random_state=42,
     size_weight=1.0,
     balance_weight=1.0,
     n_trials=500,
+    validation_size=0.1,
+    calibration_size=0.1,
 ):
     """
-    Greedy scaffold-group split optimized for molecule count and
-    molecule-level class balance.
+    Greedy four-way scaffold-group split optimized for molecule count and
+    molecule-level class balance in train, validation, calibration, and test.
 
     All molecules sharing a Bemis-Murcko scaffold stay together.
 
     Supports binary classification with labels encoded as 0 and 1.
 
     Returns:
-        train_idx, test_idx: original sample indices.
+        train_idx, validation_idx, calibration_idx, test_idx: original
+        sample indices.
     """
     smiles = list(smiles)
     y = np.asarray(labels).reshape(-1)
@@ -39,10 +42,15 @@ def stratified_scaffold_split(
         raise ValueError("smiles and labels must have equal lengths.")
     if not np.isin(y, [0, 1]).all():
         raise ValueError("labels must be binary and encoded as 0/1.")
-    if not np.isclose(train_size + test_size, 1.0):
-        raise ValueError("train_size and test_size must sum to 1.")
-    if train_size <= 0 or test_size <= 0:
-        raise ValueError("Both split sizes must be positive.")
+    split_names = ("train", "validation", "calibration", "test")
+    split_sizes = np.array(
+        [train_size, validation_size, calibration_size, test_size],
+        dtype=float,
+    )
+    if not np.isclose(split_sizes.sum(), 1.0):
+        raise ValueError("Split sizes must sum to 1.")
+    if np.any(split_sizes <= 0):
+        raise ValueError("All split sizes must be positive.")
 
     # Group molecules by Bemis-Murcko scaffold.
     scaffold_to_indices = defaultdict(list)
@@ -59,8 +67,8 @@ def stratified_scaffold_split(
         scaffold_to_indices[scaffold].append(i)
 
     groups = list(scaffold_to_indices.values())
-    if len(groups) < 2:
-        raise ValueError("At least two distinct scaffold groups are required.")
+    if len(groups) < len(split_names):
+        raise ValueError("At least four distinct scaffold groups are required.")
 
     # Each row contains [total molecules, positive molecules].
     group_stats = np.array([
@@ -75,12 +83,14 @@ def stratified_scaffold_split(
     if total_positive == 0 or total_negative == 0:
         raise ValueError("Both classes must be present.")
 
-    target_test_n = test_size * n
-    target_test_pos = test_size * total_positive
-    target_test_neg = test_size * total_negative
+    target_stats = np.column_stack((
+        split_sizes * n,
+        split_sizes * total_positive,
+        split_sizes * total_negative,
+    ))
 
     rng = np.random.default_rng(random_state)
-    best_test_groups = None
+    best_split_groups = None
     best_score = np.inf
 
     # Repeated randomized greedy assignments; retain the best objective.
@@ -96,107 +106,110 @@ def stratified_scaffold_split(
             reverse=True,
         )
 
-        test_group_ids = []
-        current = np.zeros(2, dtype=float)  # total, positives
+        split_group_ids = [[] for _ in split_names]
+        current_stats = np.zeros((len(split_names), 3), dtype=float)
 
-        for j in order:
+        for group_position, j in enumerate(order):
             size, positives = group_stats[j]
             negatives = size - positives
 
-            # Evaluate adding this group to test versus train.
-            candidate = current + [size, positives]
-
-            # Normalize errors so size and class balance contribute
-            # on comparable scales.
-            candidate_neg = candidate[0] - candidate[1]
-
-            test_size_error = (
-                (candidate[0] - target_test_n) / max(n, 1)
-            ) ** 2
-
-            test_pos_error = (
-                (candidate[1] - target_test_pos)
-                / max(total_positive, 1)
-            ) ** 2
-
-            test_neg_error = (
-                (candidate_neg - target_test_neg)
-                / max(total_negative, 1)
-            ) ** 2
-
-            # Also consider the assignment if this group stays in train.
-            current_neg = current[0] - current[1]
-
-            current_score = (
-                size_weight * ((current[0] - target_test_n) / n) ** 2
-                + balance_weight * (
-                    ((current[1] - target_test_pos)
-                     / total_positive) ** 2
-                    + ((current_neg - target_test_neg)
-                       / total_negative) ** 2
-                )
+            candidate_scores = []
+            empty_split_ids = [
+                split_id
+                for split_id, group_ids in enumerate(split_group_ids)
+                if not group_ids
+            ]
+            remaining_groups = len(order) - group_position
+            allowed_split_ids = (
+                empty_split_ids
+                if remaining_groups == len(empty_split_ids)
+                else range(len(split_names))
             )
 
-            candidate_score = (
-                size_weight * test_size_error
-                + balance_weight * (test_pos_error + test_neg_error)
-            )
+            for split_id in allowed_split_ids:
+                candidate_stats = current_stats.copy()
+                candidate_stats[split_id] += [size, positives, negatives]
+                candidate_scores.append((
+                    _split_score(
+                        candidate_stats,
+                        target_stats,
+                        n,
+                        total_positive,
+                        total_negative,
+                        size_weight,
+                        balance_weight,
+                    ),
+                    split_id,
+                ))
 
-            # Greedy choice: add if it improves the objective.
-            if candidate_score < current_score:
-                current = candidate
-                test_group_ids.append(j)
+            _, selected_split_id = min(candidate_scores)
+            current_stats[selected_split_id] += [size, positives, negatives]
+            split_group_ids[selected_split_id].append(j)
 
-        # Ensure neither split is empty.
-        if not test_group_ids or len(test_group_ids) == len(groups):
+        if any(not group_ids for group_ids in split_group_ids):
             continue
 
-        test_indices = [
-            i for j in test_group_ids for i in groups[j]
-        ]
-        test_y = y[test_indices]
-
-        # Final objective uses actual molecule counts and class balance.
-        n_test = len(test_indices)
-        n_test_pos = int(test_y.sum())
-        n_test_neg = n_test - n_test_pos
-
-        score = (
-            size_weight * ((n_test - target_test_n) / n) ** 2
-            + balance_weight * (
-                ((n_test_pos - target_test_pos)
-                 / total_positive) ** 2
-                + ((n_test_neg - target_test_neg)
-                   / total_negative) ** 2
-            )
+        score = _split_score(
+            current_stats,
+            target_stats,
+            n,
+            total_positive,
+            total_negative,
+            size_weight,
+            balance_weight,
         )
 
         if score < best_score:
             best_score = score
-            best_test_groups = set(test_group_ids)
+            best_split_groups = split_group_ids
 
-    if best_test_groups is None:
+    if best_split_groups is None:
         raise ValueError(
             "Could not find a valid split. Try increasing n_trials."
         )
 
-    test_idx = np.array(sorted(
-        i for j in best_test_groups for i in groups[j]
-    ), dtype=int)
+    split_indices = [
+        np.array(sorted(
+            i for j in group_ids for i in groups[j]
+        ), dtype=int)
+        for group_ids in best_split_groups
+    ]
+    return tuple(split_indices)
 
-    train_idx = np.array(sorted(
-        i for j, group in enumerate(groups)
-        if j not in best_test_groups
-        for i in group
-    ), dtype=int)
 
-    return train_idx, test_idx
+def _split_score(
+    current_stats,
+    target_stats,
+    total_samples,
+    total_positive,
+    total_negative,
+    size_weight,
+    balance_weight,
+):
+    normalized_size_error = (
+        (current_stats[:, 0] - target_stats[:, 0]) / total_samples
+    ) ** 2
+    normalized_positive_error = (
+        (current_stats[:, 1] - target_stats[:, 1]) / total_positive
+    ) ** 2
+    normalized_negative_error = (
+        (current_stats[:, 2] - target_stats[:, 2]) / total_negative
+    ) ** 2
+    return (
+        size_weight * normalized_size_error.sum()
+        + balance_weight * (
+            normalized_positive_error.sum() + normalized_negative_error.sum()
+        )
+    )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stratified scaffold split")
     parser.add_argument("--input", type=str, required=True, help="Path to the SMILES file")
     parser.add_argument("--output", type=str, required=True, help="Path to save the split indices")
-    parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of the dataset to include in the test split")
+    parser.add_argument("--train_size", type=float, default=0.7, help="Proportion of the dataset to include in the train split")
+    parser.add_argument("--validation_size", type=float, default=0.1, help="Proportion of the dataset to include in the validation split")
+    parser.add_argument("--calibration_size", type=float, default=0.1, help="Proportion of the dataset to include in the calibration split")
+    parser.add_argument("--test_size", type=float, default=0.1, help="Proportion of the dataset to include in the test split")
     parser.add_argument("--n_trials", type=int, default=100, help="Number of trials for finding the best split")
     parser.add_argument("--mlflow-experiment", default="bace-preprocessing", help="MLflow experiment name.")
     parser.add_argument("--mlflow-tracking-uri", help="MLflow tracking URI. Defaults to MLFLOW_TRACKING_URI or ./mlruns.")
@@ -212,22 +225,41 @@ if __name__ == "__main__":
         log_parameters({
             "input_csv": args.input,
             "output_file": args.output,
+            "train_size": args.train_size,
+            "validation_size": args.validation_size,
+            "calibration_size": args.calibration_size,
             "test_size": args.test_size,
             "n_trials": args.n_trials,
             "samples": len(df),
         })
-        train_idx, test_idx = stratified_scaffold_split(
-            smiles, labels, test_size=args.test_size, n_trials=args.n_trials
+        train_idx, validation_idx, calibration_idx, test_idx = stratified_scaffold_split(
+            smiles,
+            labels,
+            train_size=args.train_size,
+            validation_size=args.validation_size,
+            calibration_size=args.calibration_size,
+            test_size=args.test_size,
+            n_trials=args.n_trials,
         )
 
         output_dir = os.path.dirname(args.output)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
-        np.savez(args.output, train_idx=train_idx, test_idx=test_idx)
+        np.savez(
+            args.output,
+            train_idx=train_idx,
+            validation_idx=validation_idx,
+            calibration_idx=calibration_idx,
+            test_idx=test_idx,
+        )
         mlflow.log_metrics({
             "train_samples": len(train_idx),
+            "validation_samples": len(validation_idx),
+            "calibration_samples": len(calibration_idx),
             "test_samples": len(test_idx),
             "train_positive_rate": float(labels[train_idx].mean()),
+            "validation_positive_rate": float(labels[validation_idx].mean()),
+            "calibration_positive_rate": float(labels[calibration_idx].mean()),
             "test_positive_rate": float(labels[test_idx].mean()),
         })
         mlflow.log_artifact(args.output)

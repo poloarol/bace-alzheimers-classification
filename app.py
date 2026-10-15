@@ -8,6 +8,7 @@ from typing import Sequence
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent
 SOURCE_DIRECTORY = REPOSITORY_ROOT / "src"
+GNN_MODELS = ("GCN", "GAT", "GATGraphTransformer")
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,14 @@ class PipelineRunner:
             arguments.extend(["--mlflow-tracking-uri", self.tracking_uri])
         return arguments
 
-    def run_split(self, test_size: float, n_trials: int) -> None:
+    def run_split(
+        self,
+        train_size: float,
+        validation_size: float,
+        calibration_size: float,
+        test_size: float,
+        n_trials: int,
+    ) -> None:
         self._require_file(self.paths.raw_csv)
         self._run(
             "stratified_scaffold_split.py",
@@ -66,6 +74,12 @@ class PipelineRunner:
                 str(self.paths.raw_csv),
                 "--output",
                 str(self.paths.split_file),
+                "--train_size",
+                str(train_size),
+                "--validation_size",
+                str(validation_size),
+                "--calibration_size",
+                str(calibration_size),
                 "--test_size",
                 str(test_size),
                 "--n_trials",
@@ -95,8 +109,15 @@ class PipelineRunner:
         )
 
     def run_baselines(self) -> None:
-        self._require_file(self.paths.fingerprint_directory / "train_fingerprints.csv")
-        self._require_file(self.paths.fingerprint_directory / "test_fingerprints.csv")
+        for split_name in ("train", "validation", "calibration", "test"):
+            self._require_file(
+                self.paths.fingerprint_directory
+                / f"{split_name}_fingerprints.csv"
+            )
+            self._require_file(
+                self.paths.fingerprint_directory
+                / f"{split_name}_labels.csv"
+            )
         self._run(
             "baseline_model.py",
             [
@@ -137,6 +158,22 @@ class PipelineRunner:
             ],
         )
 
+    def run_all_gnn_training(
+        self,
+        epochs: int,
+        hidden_channels: int,
+        learning_rate: float,
+        batch_size: int,
+    ) -> None:
+        for model in GNN_MODELS:
+            self.run_gnn_training(
+                model,
+                epochs,
+                hidden_channels,
+                learning_rate,
+                batch_size,
+            )
+
     def run_inference(
         self,
         model_uri: str,
@@ -173,6 +210,9 @@ class PipelineRunner:
     def run_complete_pipeline(
         self,
         model: str,
+        train_size: float,
+        validation_size: float,
+        calibration_size: float,
         test_size: float,
         n_trials: int,
         radius: int,
@@ -182,18 +222,33 @@ class PipelineRunner:
         learning_rate: float,
         batch_size: int,
         include_gnn: bool,
+        all_models: bool,
     ) -> None:
-        self.run_split(test_size, n_trials)
+        self.run_split(
+            train_size,
+            validation_size,
+            calibration_size,
+            test_size,
+            n_trials,
+        )
         self.run_fingerprints(radius, n_bits)
         self.run_baselines()
         if include_gnn:
-            self.run_gnn_training(
-                model,
-                epochs,
-                hidden_channels,
-                learning_rate,
-                batch_size,
-            )
+            if all_models:
+                self.run_all_gnn_training(
+                    epochs,
+                    hidden_channels,
+                    learning_rate,
+                    batch_size,
+                )
+            else:
+                self.run_gnn_training(
+                    model,
+                    epochs,
+                    hidden_channels,
+                    learning_rate,
+                    batch_size,
+                )
 
     def _require_file(self, path: Path) -> None:
         if self.dry_run:
@@ -220,7 +275,10 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_split_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--test-size", type=float, default=0.2)
+    parser.add_argument("--train-size", type=float, default=0.7)
+    parser.add_argument("--validation-size", type=float, default=0.1)
+    parser.add_argument("--calibration-size", type=float, default=0.1)
+    parser.add_argument("--test-size", type=float, default=0.1)
     parser.add_argument("--n-trials", type=int, default=100)
 
 
@@ -232,9 +290,14 @@ def _add_fingerprint_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--model",
-        choices=("GCN", "GAT", "GATGraphTransformer"),
+        choices=GNN_MODELS,
         default="GCN",
         help="Graph model architecture.",
+    )
+    parser.add_argument(
+        "--all-models",
+        action="store_true",
+        help="Train all configured GNN architectures. Overrides --model.",
     )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--hidden-channels", type=int, default=64)
@@ -264,7 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     fingerprints_parser = commands.add_parser(
         "fingerprints",
-        help="Build train and test Morgan fingerprints.",
+        help="Build Morgan fingerprints for all four data splits.",
     )
     _add_common_arguments(fingerprints_parser)
     _add_fingerprint_arguments(fingerprints_parser)
@@ -275,7 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(baseline_parser)
 
-    gnn_parser = commands.add_parser("gnn", help="Train and evaluate the GNN.")
+    gnn_parser = commands.add_parser(
+        "gnn",
+        help="Train and evaluate one GNN, or all GNN architectures.",
+    )
     _add_common_arguments(gnn_parser)
     _add_training_arguments(gnn_parser)
 
@@ -311,19 +377,33 @@ def main() -> None:
     )
 
     if args.command == "split":
-        runner.run_split(args.test_size, args.n_trials)
+        runner.run_split(
+            args.train_size,
+            args.validation_size,
+            args.calibration_size,
+            args.test_size,
+            args.n_trials,
+        )
     elif args.command == "fingerprints":
         runner.run_fingerprints(args.radius, args.n_bits)
     elif args.command == "baseline":
         runner.run_baselines()
     elif args.command == "gnn":
-        runner.run_gnn_training(
-            args.model,
-            args.epochs,
-            args.hidden_channels,
-            args.learning_rate,
-            args.batch_size,
-        )
+        if args.all_models:
+            runner.run_all_gnn_training(
+                args.epochs,
+                args.hidden_channels,
+                args.learning_rate,
+                args.batch_size,
+            )
+        else:
+            runner.run_gnn_training(
+                args.model,
+                args.epochs,
+                args.hidden_channels,
+                args.learning_rate,
+                args.batch_size,
+            )
     elif args.command == "inference":
         runner.run_inference(
             args.model_uri,
@@ -334,6 +414,9 @@ def main() -> None:
     else:
         runner.run_complete_pipeline(
             args.model,
+            args.train_size,
+            args.validation_size,
+            args.calibration_size,
             args.test_size,
             args.n_trials,
             args.radius,
@@ -343,6 +426,7 @@ def main() -> None:
             args.learning_rate,
             args.batch_size,
             include_gnn=not args.skip_gnn,
+            all_models=args.all_models,
         )
 
 
@@ -362,6 +446,7 @@ if __name__ == "__main__":
 # python app.py gnn --model GCN --epochs 100
 # python app.py gnn --model GAT --epochs 100
 # python app.py gnn --model GATGraphTransformer --epochs 100
+# python app.py gnn --all-models --epochs 100
 
 # Run test inference from a tracked MLflow model
 # python app.py inference `

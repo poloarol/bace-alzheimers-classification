@@ -6,7 +6,7 @@ beta-secretase 1 (BACE1).
 ## What was implemented
 
 - BACE molecule graph processing with DeepChem and PyTorch Geometric.
-- Scaffold-aware, stratified train/test splitting.
+- Scaffold-aware, stratified train/validation/calibration/test splitting.
 - Morgan fingerprint generation for classical machine-learning models.
 - Baseline classifiers:
   - Random Forest
@@ -90,7 +90,7 @@ The default experiments are:
 ## Results
 
 The GNN training workflow reports the following held-out test metrics from the
-best restored checkpoint:
+checkpoint with the best validation accuracy:
 
 | Metric | Score |
 |---|---:|
@@ -100,8 +100,9 @@ best restored checkpoint:
 | Inhibitor F1 | 0.8242074927953891 |
 
 The same metrics are logged to MLflow using the exact metric names above.
-Training also logs accuracy by epoch and saves each PyTorch model under its
-model-specific artifact path (`GCN-Model`, `GAT-Model`, or
+Training also logs validation and calibration metrics by epoch, then evaluates
+the restored checkpoint on the test split. Each PyTorch model is saved under
+its model-specific artifact path (`GCN-Model`, `GAT-Model`, or
 `GATGraphTransformer-Model`). Local state-dict checkpoints default to
 `model\GCN.pth`, `model\GAT.pth`, and `model\GATGraphTransformer.pth`.
 
@@ -126,7 +127,11 @@ This creates:
 data/MoleculeNet/bace/clean/train_test_split.npz
 ```
 
-Optional parameters include `--test-size` and `--n-trials`.
+The archive contains `train_idx`, `validation_idx`, `calibration_idx`, and
+`test_idx`. The default proportions are 70% train, 10% validation, 10%
+calibration, and 10% test. Override them with `--train-size`,
+`--validation-size`, `--calibration-size`, and `--test-size`; proportions must
+sum to 1. Use `--n-trials` to change the scaffold-assignment search budget.
 
 ### 2. Build Morgan fingerprints
 
@@ -134,11 +139,15 @@ Optional parameters include `--test-size` and `--n-trials`.
 python app.py fingerprints
 ```
 
-This creates train/test fingerprint and label CSV files under:
+This creates train, validation, calibration, and test fingerprint and label
+CSV files under:
 
 ```text
 data/MoleculeNet/bace/fingerprints/
 ```
+
+The directory contains `<split>_fingerprints.csv` and `<split>_labels.csv` for
+each of `train`, `validation`, `calibration`, and `test`.
 
 Use `--radius` and `--n-bits` to change the fingerprint configuration.
 
@@ -163,7 +172,19 @@ python app.py gnn --model GAT --epochs 100
 python app.py gnn --model GATGraphTransformer --epochs 100 --batch-size 32
 ```
 
-The GNN command logs epoch-level metrics and the final test metrics to MLflow.
+To train all supported GNN architectures with one command:
+
+```powershell
+python app.py gnn --all-models --epochs 100
+```
+
+The existing `gnn --model <name>` form remains supported for legacy usage.
+Each GNN run loads the named `train`, `validation`, `calibration`, and `test`
+graph splits from the split archive. Missing processed graph files are created
+automatically under `data/MoleculeNet/bace/processed/`. The validation split
+controls checkpoint selection and early stopping; calibration and test splits
+are evaluation-only. The GNN command logs epoch-level metrics and the final
+test metrics to MLflow.
 Use `--hidden-channels` and `--learning-rate` to change model settings.
 
 ### 5. Run inference
@@ -198,11 +219,18 @@ with class order `0, 1`.
 
 ## Run the complete pipeline
 
-Run split creation, fingerprint generation, baseline training, and one selected
-GNN architecture in order:
+Run split creation, fingerprint generation, baseline training, and the selected
+GNN architecture (GCN by default) in order:
 
 ```
 python app.py all
+```
+
+Pass `--all-models` to train every supported GNN architecture in the complete
+pipeline. Without it, the legacy single-model behavior is retained:
+
+```powershell
+python app.py all --all-models
 ```
 
 The complete workflow can be configured with the same options exposed by the
@@ -210,7 +238,10 @@ individual stages:
 
 ```powershell
 python app.py all `
-  --test-size 0.2 `
+  --train-size 0.7 `
+  --validation-size 0.1 `
+  --calibration-size 0.1 `
+  --test-size 0.1 `
   --n-trials 100 `
   --radius 2 `
   --n-bits 2048 `

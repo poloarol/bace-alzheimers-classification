@@ -14,10 +14,11 @@ BASELINE_MODELS = [
     "GradientBoostingClassifier",
 ]
 FINGERPRINT_FILES = [
-    FINGERPRINT_DIR + r"\train_fingerprints.csv",
-    FINGERPRINT_DIR + r"\test_fingerprints.csv",
-    FINGERPRINT_DIR + r"\train_labels.csv",
-    FINGERPRINT_DIR + r"\test_labels.csv",
+    FINGERPRINT_DIR + rf"\{split}_fingerprints.csv"
+    for split in ["train", "validation", "calibration", "test"]
+] + [
+    FINGERPRINT_DIR + rf"\{split}_labels.csv"
+    for split in ["train", "validation", "calibration", "test"]
 ]
 
 
@@ -37,6 +38,9 @@ rule split:
     shell:
         "{PYTHON} src\\stratified_scaffold_split.py "
         "--input {input} --output {output} "
+        "--train_size {config[train_size]} "
+        "--validation_size {config[validation_size]} "
+        "--calibration_size {config[calibration_size]} "
         "--test_size {config[test_size]} --n_trials {config[n_trials]}"
 
 
@@ -57,7 +61,13 @@ rule fingerprints:
 rule baselines:
     input:
         train=FINGERPRINT_DIR + r"\train_fingerprints.csv",
-        test=FINGERPRINT_DIR + r"\test_fingerprints.csv"
+        validation=FINGERPRINT_DIR + r"\validation_fingerprints.csv",
+        calibration=FINGERPRINT_DIR + r"\calibration_fingerprints.csv",
+        test=FINGERPRINT_DIR + r"\test_fingerprints.csv",
+        train_labels=FINGERPRINT_DIR + r"\train_labels.csv",
+        validation_labels=FINGERPRINT_DIR + r"\validation_labels.csv",
+        calibration_labels=FINGERPRINT_DIR + r"\calibration_labels.csv",
+        test_labels=FINGERPRINT_DIR + r"\test_labels.csv"
     output:
         expand(OUTPUT_DIR + r"\{model}\confusion_matrix.png", model=BASELINE_MODELS)
     shell:

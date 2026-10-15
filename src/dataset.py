@@ -13,9 +13,27 @@ from tqdm import tqdm
 
 
 class MoleculeDataset(Dataset):
-    def __init__(self, root, filename, test=False, transform=None, pre_transform=None):
+    _SPLITS = ("train", "validation", "calibration", "test")
+
+    def __init__(
+        self,
+        root,
+        filename,
+        test=False,
+        split=None,
+        transform=None,
+        pre_transform=None,
+    ):
         self.filename = filename
-        self.test = test
+        if split is None:
+            split = "test" if test else "train"
+        if split not in self._SPLITS:
+            raise ValueError(
+                f"split must be one of {self._SPLITS}, got {split!r}."
+            )
+        if test and split != "test":
+            raise ValueError("test=True cannot be combined with a non-test split.")
+        self.split = split
 
         super().__init__(
             root=root,
@@ -29,10 +47,7 @@ class MoleculeDataset(Dataset):
 
     @property
     def processed_file_names(self):
-        if self.test:
-            return "test_complete.txt"
-        else:
-            return "train_complete.txt"
+        return f"{self.split}_complete.txt"
 
     def download(self):
         pass
@@ -52,11 +67,11 @@ class MoleculeDataset(Dataset):
         split_path = Path(self.root) / "clean" / "train_test_split.npz"
         if not split_path.exists():
             raise FileNotFoundError(
-                f"Train/test split file does not exist: {split_path}"
+                f"Split file does not exist: {split_path}"
             )
 
         with np.load(split_path) as split:
-            split_indices = split["test_idx" if self.test else "train_idx"]
+            split_indices = split[f"{self.split}_idx"]
 
         if np.any(split_indices < 0) or np.any(split_indices >= len(df)):
             raise IndexError(
@@ -106,10 +121,10 @@ class MoleculeDataset(Dataset):
 
                 # IMPORTANT:
                 # Use a contiguous processed index.
-                if self.test:
-                    filename = f"data_test_{processed_index}.pt"
-                else:
+                if self.split == "train":
                     filename = f"data_{processed_index}.pt"
+                else:
+                    filename = f"data_{self.split}_{processed_index}.pt"
 
                 filepath = os.path.join(
                     self.processed_dir,
@@ -158,10 +173,10 @@ class MoleculeDataset(Dataset):
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Dataset index out of range: {idx}")
 
-        if self.test:
-            filename = f"data_test_{idx}.pt"
-        else:
+        if self.split == "train":
             filename = f"data_{idx}.pt"
+        else:
+            filename = f"data_{self.split}_{idx}.pt"
 
         filepath = os.path.join(
             self.processed_dir,

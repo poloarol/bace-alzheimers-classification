@@ -101,16 +101,40 @@ if __name__ == "__main__":
         "model": args.model,
     })
     
-    train_dataset = MoleculeDataset(root=args.dataset_path, filename="bace_processed.csv")
-    test_dataset = MoleculeDataset(root=args.dataset_path, filename="bace_processed.csv", test=True)
+    train_dataset = MoleculeDataset(
+        root=args.dataset_path,
+        filename="bace_processed.csv",
+        split="train",
+    )
+    validation_dataset = MoleculeDataset(
+        root=args.dataset_path,
+        filename="bace_processed.csv",
+        split="validation",
+    )
+    calibration_dataset = MoleculeDataset(
+        root=args.dataset_path,
+        filename="bace_processed.csv",
+        split="calibration",
+    )
+    test_dataset = MoleculeDataset(
+        root=args.dataset_path,
+        filename="bace_processed.csv",
+        split="test",
+    )
     
     print(f"Number of training samples: {len(train_dataset)}")
+    print(f"Number of validation samples: {len(validation_dataset)}")
+    print(f"Number of calibration samples: {len(calibration_dataset)}")
     print(f"Number of test samples: {len(test_dataset)}")
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False)
+    calibration_loader = DataLoader(calibration_dataset, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     train_loader = [(data.to(device)) for data in train_loader]
+    validation_loader = [(data.to(device)) for data in validation_loader]
+    calibration_loader = [(data.to(device)) for data in calibration_loader]
     test_loader = [(data.to(device)) for data in test_loader]
     
     model = build_model(
@@ -137,9 +161,21 @@ if __name__ == "__main__":
 
         if epoch % eval_every == 0 or epoch == 1:
             train_metrics = evaluate(model, train_loader)
+            validation_metrics = evaluate(model, validation_loader)
+            calibration_metrics = evaluate(model, calibration_loader)
             test_metrics = evaluate(model, test_loader)
             mlflow.log_metrics({
                 "train_accuracy": train_metrics["Accuracy"],
+                "validation_accuracy": validation_metrics["Accuracy"],
+                "validation_roc_auc": validation_metrics["ROC-AUC"],
+                "validation_pr_auc": validation_metrics["PR-AUC"],
+                "validation_balanced_accuracy": validation_metrics["Balanced accuracy"],
+                "validation_inhibitor_f1": validation_metrics["Inhibitor F1"],
+                "calibration_accuracy": calibration_metrics["Accuracy"],
+                "calibration_roc_auc": calibration_metrics["ROC-AUC"],
+                "calibration_pr_auc": calibration_metrics["PR-AUC"],
+                "calibration_balanced_accuracy": calibration_metrics["Balanced accuracy"],
+                "calibration_inhibitor_f1": calibration_metrics["Inhibitor F1"],
                 "test_accuracy": test_metrics["Accuracy"],
                 "test_roc_auc": test_metrics["ROC-AUC"],
                 "test_pr_auc": test_metrics["PR-AUC"],
@@ -149,13 +185,14 @@ if __name__ == "__main__":
 
             progress.set_postfix(
                 train_acc=f"{train_metrics['Accuracy']:.4f}",
+                val_acc=f"{validation_metrics['Accuracy']:.4f}",
                 test_acc=f"{test_metrics['Accuracy']:.4f}",
                 roc_auc=f"{test_metrics['ROC-AUC']:.4f}",
                 best_val_acc=f"{best_val_acc:.4f}",
             )
 
-            if test_metrics["Accuracy"] > best_val_acc:
-                best_val_acc = test_metrics["Accuracy"]
+            if validation_metrics["Accuracy"] > best_val_acc:
+                best_val_acc = validation_metrics["Accuracy"]
                 best_model_state = copy.deepcopy(model.state_dict())
                 epochs_without_improvement = 0
             else:
@@ -164,7 +201,7 @@ if __name__ == "__main__":
             if epochs_without_improvement >= patience:
                 progress.write(
                     f"Early stopping at epoch {epoch}. "
-                    f"Best test accuracy: {best_val_acc:.4f}"
+                    f"Best validation accuracy: {best_val_acc:.4f}"
                 )
                 break
 

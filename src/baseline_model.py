@@ -94,9 +94,13 @@ if __name__ == "__main__":
     configure_mlflow(args.mlflow_experiment, args.mlflow_tracking_uri)
     
     train_data = pd.read_csv(os.path.join(args.data, "train_fingerprints.csv"))
+    validation_data = pd.read_csv(os.path.join(args.data, "validation_fingerprints.csv"))
+    calibration_data = pd.read_csv(os.path.join(args.data, "calibration_fingerprints.csv"))
     test_data = pd.read_csv(os.path.join(args.data, "test_fingerprints.csv"))
 
     train_labels = pd.read_csv(os.path.join(args.data, "train_labels.csv"))
+    validation_labels = pd.read_csv(os.path.join(args.data, "validation_labels.csv"))
+    calibration_labels = pd.read_csv(os.path.join(args.data, "calibration_labels.csv"))
     test_labels = pd.read_csv(os.path.join(args.data, "test_labels.csv"))
 
     estimators = [create_estimator(method="random_forest"),
@@ -110,11 +114,28 @@ if __name__ == "__main__":
                 "model": model_name,
                 "data_dir": args.data,
                 "train_samples": len(train_data),
+                "validation_samples": len(validation_data),
+                "calibration_samples": len(calibration_data),
                 "test_samples": len(test_data),
                 **estimator.get_params(),
             })
             clf = train(estimator, train_data.values, train_labels.values.ravel())
-            evaluation_results = evaluate(clf, test_data.values, test_labels.values.ravel())
+            split_data = {
+                "validation": (validation_data, validation_labels),
+                "calibration": (calibration_data, calibration_labels),
+                "test": (test_data, test_labels),
+            }
+            evaluation_results = {}
+            for split_name, (features, split_labels) in split_data.items():
+                split_metrics = evaluate(
+                    clf,
+                    features.values,
+                    split_labels.values.ravel(),
+                )
+                evaluation_results.update({
+                    f"{split_name}_{metric}": value
+                    for metric, value in split_metrics.items()
+                })
             mlflow.log_metrics(evaluation_results)
             mlflow.sklearn.log_model(
                 sk_model=clf,

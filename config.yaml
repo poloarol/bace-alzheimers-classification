@@ -1,6 +1,9 @@
 dataset_root: 'data\MoleculeNet\bace'
 python: 'python'
-test_size: 0.2
+train_size: 0.7
+validation_size: 0.1
+calibration_size: 0.1
+test_size: 0.1
 n_trials: 100
 radius: 2
 n_bits: 2048

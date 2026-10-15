@@ -81,7 +81,7 @@ def run_gnn_inference(
     dataset = MoleculeDataset(
         root=dataset_root,
         filename="bace_processed.csv",
-        test=True,
+        split="test",
     )
     if not dataset:
         raise ValueError("The test dataset is empty.")
