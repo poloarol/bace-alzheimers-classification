@@ -561,11 +561,17 @@ python app.py all
 ```
 
 Pass `--all-models` to train every supported GNN architecture in the complete
-pipeline. Without it, the legacy single-model behavior is retained:
+pipeline. Without it, the legacy single-model behavior is retained. With
+`--all-models`, the run also finishes with the data audit and the cross-model
+comparison (the same `audit` and `compare` steps Snakemake runs), because the
+comparison needs every architecture:
 
 ```powershell
 python app.py all --all-models
 ```
+
+`python app.py all`, `baseline`, and `gnn` accept `--confidence` (default 0.90)
+for the conformal target, matching `confidence` in `config.yaml`.
 
 The complete workflow can be configured with the same options exposed by the
 individual stages:
@@ -634,7 +640,7 @@ Execute the workflow:
 snakemake --cores 1
 ```
 
-The workflow (`config.yaml` drives all parameters, including the conformal `confidence`, default 0.90) runs these stages; `rule all` requests every final artifact:
+The workflow (`config.yaml` drives all parameters, including the conformal `confidence`, default 0.90, and the calibration `calibration_bins`/`calibration_bootstrap`, defaults 10/1000) runs the same stages, with the same arguments and MLflow experiments, as `python app.py all --all-models`; `rule all` requests every final artifact:
 
 | Rule | Purpose | Key outputs |
 |---|---|---|

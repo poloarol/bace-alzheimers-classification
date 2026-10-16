@@ -64,7 +64,8 @@ rule split:
         "--train_size {config[train_size]} "
         "--validation_size {config[validation_size]} "
         "--calibration_size {config[calibration_size]} "
-        "--test_size {config[test_size]} --n_trials {config[n_trials]}"
+        "--test_size {config[test_size]} --n_trials {config[n_trials]} "
+        "--mlflow-experiment bace-preprocessing"
 
 
 rule fingerprints:
@@ -78,7 +79,8 @@ rule fingerprints:
         "--input_csv {input.csv} "
         "--train_test_split_npz {input.split} "
         "--output_dir " + FINGERPRINT_DIR + " "
-        "--radius {config[radius]} --n_bits {config[n_bits]}"
+        "--radius {config[radius]} --n_bits {config[n_bits]} "
+        "--mlflow-experiment bace-preprocessing"
 
 
 rule baselines:
@@ -90,7 +92,8 @@ rule baselines:
         "{PYTHON} " + SCRIPT("baseline_model.py") + " "
         "--data " + FINGERPRINT_DIR + " "
         "--confusion-matrix-path " + OUTPUT_DIR + " "
-        "--predictions-dir " + PREDICTIONS_DIR
+        "--predictions-dir " + PREDICTIONS_DIR + " "
+        "--mlflow-experiment bace-baseline"
 
 
 rule train_gnn:
@@ -116,7 +119,8 @@ rule train_gnn:
         "--hidden-channels {params.hidden_channels} "
         "--learning-rate {params.learning_rate} "
         "--batch-size {params.batch_size} "
-        "--model-output {output[0]}"
+        "--model-output {output[0]} "
+        "--mlflow-experiment bace-gnn"
 
 
 # Single authoritative calibration step: fits T on validation logits, evaluates on test.
@@ -131,12 +135,15 @@ rule calibrate_gnn:
         os.path.join(CALIBRATION_DIR, "reliability_table.csv"),
         os.path.join(CALIBRATION_DIR, "calibration_report.json")
     params:
-        output_dir=CALIBRATION_DIR
+        output_dir=CALIBRATION_DIR,
+        bins=config["calibration_bins"],
+        bootstrap=config["calibration_bootstrap"]
     shell:
         "{PYTHON} " + SCRIPT("calibration.py") + " "
         "--fit-predictions {input.validation} --eval-predictions {input.test} "
         "--model-name {wildcards.model} --checkpoint {input.checkpoint} "
         "--output-dir {params.output_dir} --temperature-output {output[0]} "
+        "--bins {params.bins} --bootstrap {params.bootstrap} "
         "--mlflow-experiment bace-calibration"
 
 
@@ -165,8 +172,12 @@ rule calibrate_baseline:
         SELECTED_BASELINE
     output:
         touch(BASELINE_CALIBRATED)
+    params:
+        bins=config["calibration_bins"],
+        bootstrap=config["calibration_bootstrap"]
     shell:
-        "{PYTHON} app.py calibrate " + APP_ARGS + " --model-type best-baseline"
+        "{PYTHON} app.py calibrate " + APP_ARGS + " --model-type best-baseline "
+        "--bins {params.bins} --bootstrap {params.bootstrap}"
 
 
 rule conformal_baseline:
@@ -185,7 +196,9 @@ rule conformal_baseline:
 rule audit:
     input:
         csv=RAW_CSV,
-        split=SPLIT_FILE
+        split=SPLIT_FILE,
+        # Trained GNNs build the processed graph datasets that the audit counts.
+        models=expand(os.path.join(MODEL_DIR, "{model}.pth"), model=config["gnn_models"])
     output:
         SPLIT_AUDIT
     shell:

@@ -118,7 +118,7 @@ class PipelineRunner:
             ],
         )
 
-    def run_baselines(self) -> None:
+    def run_baselines(self, confidence: float = 0.90) -> None:
         for split_name in ("train", "validation", "calibration", "test"):
             self._require_file(
                 self.paths.fingerprint_directory
@@ -141,7 +141,7 @@ class PipelineRunner:
             ],
         )
         self.run_calibration(BEST_BASELINE, None, None, None, None, 10)
-        self.run_conformal(BEST_BASELINE)
+        self.run_conformal(BEST_BASELINE, confidence=confidence)
 
     def run_gnn_training(
         self,
@@ -150,6 +150,7 @@ class PipelineRunner:
         hidden_channels: int,
         learning_rate: float,
         batch_size: int,
+        confidence: float = 0.90,
     ) -> None:
         self._require_file(self.paths.raw_csv)
         self._require_file(self.paths.split_file)
@@ -176,7 +177,7 @@ class PipelineRunner:
             ],
         )
         self.run_calibration(model, None, None, None, None, 10)
-        self.run_conformal(model)
+        self.run_conformal(model, confidence=confidence)
 
     def run_all_gnn_training(
         self,
@@ -184,6 +185,7 @@ class PipelineRunner:
         hidden_channels: int,
         learning_rate: float,
         batch_size: int,
+        confidence: float = 0.90,
     ) -> None:
         for model in GNN_MODELS:
             self.run_gnn_training(
@@ -192,6 +194,7 @@ class PipelineRunner:
                 hidden_channels,
                 learning_rate,
                 batch_size,
+                confidence,
             )
 
     def run_inference(
@@ -385,8 +388,12 @@ class PipelineRunner:
     ) -> None:
         self.run_audit()
         if retrain:
-            self.run_baselines()
-            self.run_all_gnn_training(epochs, hidden_channels, learning_rate, batch_size)
+            self.run_baselines(confidence)
+            self.run_all_gnn_training(
+                epochs, hidden_channels, learning_rate, batch_size, confidence
+            )
+            # Re-audit so processed-graph counts reflect the retrained datasets.
+            self.run_audit()
         self._run(
             "compare_models.py",
             [
@@ -440,6 +447,7 @@ class PipelineRunner:
         batch_size: int,
         include_gnn: bool,
         all_models: bool,
+        confidence: float = 0.90,
     ) -> None:
         self.run_split(
             train_size,
@@ -449,7 +457,7 @@ class PipelineRunner:
             n_trials,
         )
         self.run_fingerprints(radius, n_bits)
-        self.run_baselines()
+        self.run_baselines(confidence)
         if include_gnn:
             models = GNN_MODELS if all_models else (model,)
             for gnn_model in models:
@@ -459,6 +467,16 @@ class PipelineRunner:
                     hidden_channels,
                     learning_rate,
                     batch_size,
+                    confidence,
+                )
+            # The comparison needs every architecture, like the Snakemake `compare` rule.
+            if all_models:
+                self.run_comparison(
+                    epochs=epochs,
+                    hidden_channels=hidden_channels,
+                    learning_rate=learning_rate,
+                    batch_size=batch_size,
+                    confidence=confidence,
                 )
 
     def _require_file(self, path: Path) -> None:
@@ -536,6 +554,15 @@ def _confidence_level(value: str) -> float:
     return confidence
 
 
+def _add_confidence_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--confidence",
+        type=_confidence_level,
+        default=0.90,
+        help="Target conformal coverage in (0, 1); defaults to 0.90.",
+    )
+
+
 def _add_inference_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
     parser.add_argument("--model-uri", required=required)
     parser.add_argument(
@@ -601,6 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Train and evaluate scikit-learn baselines.",
     )
     _add_common_arguments(baseline_parser)
+    _add_confidence_argument(baseline_parser)
 
     gnn_parser = commands.add_parser(
         "gnn",
@@ -608,6 +636,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(gnn_parser)
     _add_training_arguments(gnn_parser)
+    _add_confidence_argument(gnn_parser)
 
     inference_parser = commands.add_parser(
         "inference",
@@ -684,6 +713,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_split_arguments(all_parser)
     _add_fingerprint_arguments(all_parser)
     _add_training_arguments(all_parser)
+    _add_confidence_argument(all_parser)
     all_parser.add_argument(
         "--skip-gnn",
         action="store_true",
@@ -713,7 +743,7 @@ def main() -> None:
     elif args.command == "fingerprints":
         runner.run_fingerprints(args.radius, args.n_bits)
     elif args.command == "baseline":
-        runner.run_baselines()
+        runner.run_baselines(args.confidence)
     elif args.command == "gnn":
         if args.all_models:
             runner.run_all_gnn_training(
@@ -721,6 +751,7 @@ def main() -> None:
                 args.hidden_channels,
                 args.learning_rate,
                 args.batch_size,
+                args.confidence,
             )
         else:
             runner.run_gnn_training(
@@ -729,6 +760,7 @@ def main() -> None:
                 args.hidden_channels,
                 args.learning_rate,
                 args.batch_size,
+                args.confidence,
             )
     elif args.command == "inference":
         runner.run_inference(
@@ -784,6 +816,7 @@ def main() -> None:
             args.batch_size,
             include_gnn=not args.skip_gnn,
             all_models=args.all_models,
+            confidence=args.confidence,
         )
 
 

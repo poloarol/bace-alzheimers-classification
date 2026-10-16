@@ -12,6 +12,8 @@ hidden_channels: 64
 learning_rate: 0.01
 batch_size: 32
 confidence: 0.90
+calibration_bins: 10
+calibration_bootstrap: 1000
 gnn_models:
   - GCN
   - GAT
