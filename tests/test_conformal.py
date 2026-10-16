@@ -18,16 +18,15 @@ from conformal import MolecularConformalPredictor, main
 
 class MolecularConformalPredictorTests(unittest.TestCase):
     def setUp(self):
+        true_class_probabilities = [0.9] * 4 + [0.8] * 4 + [0.5]
+        self.calibration_labels = np.array([0, 1] * 4 + [0])
         self.calibration_probabilities = np.array([
-            [0.9, 0.1],
-            [0.1, 0.9],
-            [0.8, 0.2],
-            [0.2, 0.8],
+            [p, 1 - p] if label == 0 else [1 - p, p]
+            for p, label in zip(true_class_probabilities, self.calibration_labels)
         ])
-        self.calibration_labels = np.array([0, 1, 0, 1])
 
     def test_finite_sample_threshold_and_prediction_sets(self):
-        predictor = MolecularConformalPredictor(confidence=0.8)
+        predictor = MolecularConformalPredictor(confidence=0.75)
         predictor.fit(self.calibration_probabilities, self.calibration_labels)
 
         result = predictor.predict(np.array([[0.8, 0.2], [0.5, 0.5]]))
@@ -37,7 +36,7 @@ class MolecularConformalPredictorTests(unittest.TestCase):
         self.assertEqual(result["set_sizes"].tolist(), [1, 0])
 
     def test_nonstandard_class_order_is_supported(self):
-        predictor = MolecularConformalPredictor(classes=(1, 0), confidence=0.8)
+        predictor = MolecularConformalPredictor(classes=(1, 0), confidence=0.75)
         probabilities = self.calibration_probabilities[:, ::-1]
         predictor.fit(probabilities, self.calibration_labels)
 
@@ -46,7 +45,7 @@ class MolecularConformalPredictorTests(unittest.TestCase):
         self.assertEqual(result["prediction_sets"], [[0]])
 
     def test_evaluation_reports_class_and_group_coverage(self):
-        predictor = MolecularConformalPredictor(confidence=0.8)
+        predictor = MolecularConformalPredictor(confidence=0.75)
         predictor.fit(self.calibration_probabilities, self.calibration_labels)
 
         metrics = predictor.evaluate(
@@ -55,7 +54,7 @@ class MolecularConformalPredictorTests(unittest.TestCase):
             groups=np.array(["scaffold-a", "scaffold-b"]),
         )
 
-        self.assertEqual(metrics["n_calibration"], 4)
+        self.assertEqual(metrics["n_calibration"], 9)
         self.assertEqual(metrics["empirical_coverage"], 0.5)
         self.assertEqual(metrics["coverage_by_group"]["scaffold-a"]["coverage"], 1.0)
         self.assertEqual(metrics["coverage_by_group"]["scaffold-b"]["coverage"], 0.0)

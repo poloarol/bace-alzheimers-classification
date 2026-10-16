@@ -4,6 +4,9 @@
 Uses the hinge nonconformity score:
     score(x, y) = 1 - P(y | x)
 
+Prediction sets come from the `crepes` ConformalClassifier, fitted on the
+dedicated calibration split and reported on the untouched test split.
+
 The classifier must be trained before conformal calibration. Model selection
 and probability calibration must not use the conformal calibration or test set.
 """
@@ -17,6 +20,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from crepes import ConformalClassifier
 
 from calibration import (
     _read_predictions,
@@ -103,6 +107,8 @@ class MolecularConformalPredictor:
         self.calibration_scores = 1.0 - probabilities_cal[
             np.arange(len(y_cal)), class_indices
         ]
+        self._crepes = ConformalClassifier()
+        self._crepes.fit(self.calibration_scores, seed=self.seed)
         self.is_fitted = True
         self.n_calibration = len(y_cal)
 
@@ -130,10 +136,13 @@ class MolecularConformalPredictor:
             raise ValueError("confidence must be between 0 and 1.")
 
         threshold = self._threshold(confidence)
-        set_matrix = [
-            self.classes[1.0 - row <= threshold].tolist()
-            for row in probabilities
-        ]
+        # Deterministic (unsmoothed) crepes p-values keep coverage conservative.
+        membership = self._crepes.predict_set(
+            1.0 - probabilities,
+            confidence=confidence,
+            smoothing=False,
+        ).astype(bool)
+        set_matrix = [self.classes[row].tolist() for row in membership]
         set_sizes = np.asarray([len(prediction_set) for prediction_set in set_matrix])
 
         return {

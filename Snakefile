@@ -16,6 +16,19 @@ SELECTED_BASELINE = os.path.join(PREDICTIONS_DIR, "selected_baseline.json")
 CALIBRATION_JSON = os.path.join(MODEL_DIR, "{model}.calibration.json")
 CALIBRATION_DIR = os.path.join(OUTPUT_DIR, "calibration", "{model}")
 
+CONFORMAL_DIR = os.path.join(OUTPUT_DIR, "conformal", "{model}")
+SPLIT_AUDIT = os.path.join(OUTPUT_DIR, "split_audit.json")
+COMPARISON_DIR = os.path.join(OUTPUT_DIR, "comparison")
+COMPARISON_FILES = [
+    os.path.join(COMPARISON_DIR, "comparison.csv"),
+    os.path.join(COMPARISON_DIR, "comparison.json"),
+]
+# The winning baseline is only known after training, so its calibration and
+# conformal steps go through app.py and are tracked with marker files.
+BASELINE_CALIBRATED = os.path.join(OUTPUT_DIR, "calibration", "best-baseline.done")
+BASELINE_CONFORMAL = os.path.join(OUTPUT_DIR, "conformal", "best-baseline.done")
+APP_ARGS = "--dataset-root " + DATASET_ROOT
+
 SPLITS = ["train", "validation", "calibration", "test"]
 FINGERPRINT_FILES = [
     os.path.join(FINGERPRINT_DIR, f"{split}_fingerprints.csv") for split in SPLITS
@@ -33,6 +46,11 @@ rule all:
         expand(os.path.join(MODEL_DIR, "{model}.pth"), model=config["gnn_models"]),
         expand(CALIBRATION_JSON, model=config["gnn_models"]),
         expand(os.path.join(CALIBRATION_DIR, "calibration_report.json"), model=config["gnn_models"]),
+        expand(os.path.join(CONFORMAL_DIR, "conformal_report.json"), model=config["gnn_models"]),
+        BASELINE_CALIBRATED,
+        BASELINE_CONFORMAL,
+        SPLIT_AUDIT,
+        COMPARISON_FILES,
 
 
 rule split:
@@ -82,6 +100,7 @@ rule train_gnn:
     output:
         os.path.join(MODEL_DIR, "{model}.pth"),
         os.path.join(PREDICTIONS_DIR, "{model}", "validation_predictions.csv"),
+        os.path.join(PREDICTIONS_DIR, "{model}", "calibration_predictions.csv"),
         os.path.join(PREDICTIONS_DIR, "{model}", "test_predictions.csv")
     params:
         epochs=config["epochs"],
@@ -119,3 +138,81 @@ rule calibrate_gnn:
         "--model-name {wildcards.model} --checkpoint {input.checkpoint} "
         "--output-dir {params.output_dir} --temperature-output {output[0]} "
         "--mlflow-experiment bace-calibration"
+
+
+# Conformal sets: fit on the calibration split, report on the untouched test split.
+rule conformal_gnn:
+    input:
+        calibration=os.path.join(PREDICTIONS_DIR, "{model}", "calibration_predictions.csv"),
+        test=os.path.join(PREDICTIONS_DIR, "{model}", "test_predictions.csv"),
+        temperature=CALIBRATION_JSON
+    output:
+        os.path.join(CONFORMAL_DIR, "conformal_report.json"),
+        os.path.join(CONFORMAL_DIR, "conformal_predictions.csv")
+    params:
+        output_dir=CONFORMAL_DIR,
+        confidence=config["confidence"]
+    shell:
+        "{PYTHON} " + SCRIPT("conformal.py") + " "
+        "--calibration-predictions {input.calibration} --test-predictions {input.test} "
+        "--temperature-file {input.temperature} --model-name {wildcards.model} "
+        "--output-dir {params.output_dir} --confidence {params.confidence} "
+        "--mlflow-experiment bace-conformal"
+
+
+rule calibrate_baseline:
+    input:
+        SELECTED_BASELINE
+    output:
+        touch(BASELINE_CALIBRATED)
+    shell:
+        "{PYTHON} app.py calibrate " + APP_ARGS + " --model-type best-baseline"
+
+
+rule conformal_baseline:
+    input:
+        selection=SELECTED_BASELINE,
+        calibrated=BASELINE_CALIBRATED
+    output:
+        touch(BASELINE_CONFORMAL)
+    params:
+        confidence=config["confidence"]
+    shell:
+        "{PYTHON} app.py conformal " + APP_ARGS + " --model-type best-baseline "
+        "--confidence {params.confidence}"
+
+
+rule audit:
+    input:
+        csv=RAW_CSV,
+        split=SPLIT_FILE
+    output:
+        SPLIT_AUDIT
+    shell:
+        "{PYTHON} " + SCRIPT("audit_splits.py") + " "
+        "--dataset-path " + DATASET_ROOT + " --output {output}"
+
+
+# One comparison run on the shared split; verifies that every model saw the same molecules.
+rule compare:
+    input:
+        SPLIT_AUDIT,
+        BASELINE_CALIBRATED,
+        BASELINE_CONFORMAL,
+        expand(CALIBRATION_JSON, model=config["gnn_models"]),
+        expand(os.path.join(CONFORMAL_DIR, "conformal_report.json"), model=config["gnn_models"]),
+        expand(os.path.join(CALIBRATION_DIR, "calibration_report.json"), model=config["gnn_models"])
+    output:
+        COMPARISON_FILES
+    params:
+        epochs=config["epochs"],
+        hidden_channels=config["hidden_channels"],
+        learning_rate=config["learning_rate"],
+        batch_size=config["batch_size"],
+        confidence=config["confidence"]
+    shell:
+        "{PYTHON} " + SCRIPT("compare_models.py") + " "
+        "--dataset-path " + DATASET_ROOT + " "
+        "--epochs {params.epochs} --hidden-channels {params.hidden_channels} "
+        "--learning-rate {params.learning_rate} --batch-size {params.batch_size} "
+        "--confidence {params.confidence} --mlflow-experiment bace-comparison"

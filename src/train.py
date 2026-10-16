@@ -237,7 +237,7 @@ if __name__ == "__main__":
 
     patience = 20
     eval_every = 5
-    best_val_acc = float("-inf")
+    best_val_pr_auc = float("-inf")
     epochs_without_improvement = 0
     best_model_state = None
 
@@ -269,8 +269,9 @@ if __name__ == "__main__":
                 step=epoch,
             )
 
-            if validation_metrics["Accuracy"] > best_val_acc:
-                best_val_acc = validation_metrics["Accuracy"]
+            # Checkpoint selection uses validation PR-AUC, matching the baselines.
+            if validation_metrics["PR-AUC"] > best_val_pr_auc:
+                best_val_pr_auc = validation_metrics["PR-AUC"]
                 best_model_state = copy.deepcopy(model.state_dict())
                 epochs_without_improvement = 0
             else:
@@ -278,14 +279,14 @@ if __name__ == "__main__":
 
             progress.set_postfix(
                 train_acc=f"{train_metrics['Accuracy']:.4f}",
-                val_acc=f"{validation_metrics['Accuracy']:.4f}",
-                best_val_acc=f"{best_val_acc:.4f}",
+                val_pr_auc=f"{validation_metrics['PR-AUC']:.4f}",
+                best_val_pr_auc=f"{best_val_pr_auc:.4f}",
             )
 
             if epochs_without_improvement >= patience:
                 progress.write(
                     f"Early stopping at epoch {epoch}. "
-                    f"Best validation accuracy: {best_val_acc:.4f}"
+                    f"Best validation PR-AUC: {best_val_pr_auc:.4f}"
                 )
                 break
 
@@ -293,7 +294,7 @@ if __name__ == "__main__":
         raise RuntimeError("Training ended without saving a model checkpoint.")
 
     model.load_state_dict(best_model_state)
-    mlflow.log_metric("best_validation_accuracy", best_val_acc)
+    mlflow.log_metric("best_validation_pr_auc", best_val_pr_auc)
     # These held-out logits are consumed by temperature calibration and conformal evaluation.
     validation_labels, validation_logits = collect_predictions(model, validation_loader)
     calibration_labels, calibration_logits = collect_predictions(model, calibration_loader)

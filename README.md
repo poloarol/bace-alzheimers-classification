@@ -90,20 +90,75 @@ The project uses:
 
 ## Current results
 
-The existing GNN training workflow reports the following held-out metrics:
+The numbers below come from **one clean run under the revised protocol**
+(`python app.py compare --retrain`). All models share the same scaffold split,
+and each model is selected on **validation PR-AUC**. Temperature scaling is
+fitted on validation, conformal sets are fitted on the dedicated calibration
+split, and every metric below is reported on the untouched test split (151
+molecules: 82 non-inhibitors, 69 inhibitors).
 
-| Metric | Reported score |
-|---|---:|
-| ROC-AUC | 0.886 |
-| PR-AUC | 0.892 |
-| Balanced accuracy | 0.818 |
-| Inhibitor-class F1 | 0.824 |
+| Model | Val PR-AUC | Test PR-AUC | Test ROC-AUC | Balanced acc. | Inhibitor F1 |
+|---|---:|---:|---:|---:|---:|
+| Morgan baseline (GradientBoostingClassifier) | 0.883 | **0.791** | **0.794** | **0.706** | **0.656** |
+| GCN | 0.793 | 0.579 | 0.655 | 0.621 | 0.530 |
+| GAT | 0.767 | 0.640 | 0.674 | 0.610 | 0.529 |
+| GATGraphTransformer (hybrid) | 0.826 | 0.591 | 0.691 | 0.627 | 0.567 |
 
-These results provide an initial performance baseline for the graph learning pipeline.
+Calibration (temperature scaling) and conformal prediction at a 0.90 target:
 
-**Evaluation caveat:** The table above was produced by an earlier training implementation in which test accuracy influenced checkpoint selection, so these numbers are preliminary and optimistic. The current code selects checkpoints on the validation split only and uses the test split for final evaluation; re-run the pipeline to regenerate the results.
+| Model | `T` | ECE before | ECE after | NLL before | NLL after | Coverage | Class-1 coverage | Avg. set size |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Morgan baseline | 0.84 | 0.081 | 0.120 | 0.557 | 0.570 | 0.901 | 0.812 | 1.48 |
+| GCN | 1.53 | 0.155 | 0.103 | 0.842 | 0.726 | 0.894 | 0.841 | 1.68 |
+| GAT | 2.31 | 0.153 | 0.074 | 0.873 | 0.680 | 0.887 | 0.783 | 1.60 |
+| GATGraphTransformer | 1.65 | 0.168 | 0.125 | 0.874 | 0.720 | 0.894 | 0.870 | 1.67 |
 
-The classical baselines are also implemented and evaluated by the pipeline. A consolidated comparison of the baseline models and all GNN architectures, using a consistent and independently evaluated split, remains a next step.
+How to read this:
+
+- Under the revised protocol the Morgan baseline outperforms all three graph
+  models on the test split. These results replace the earlier, more optimistic
+  GNN numbers (see [Historical results](#historical-results-superseded)).
+- Every model scores much lower on test than on validation, which is
+  consistent with the scaffold-aware split but is not a cause that was tested
+  here.
+- GNNs ran for the default 100 epochs with one seed and no hyperparameter
+  search, and validation PR-AUC was still improving near the end for some
+  models. They may be under-trained, so the gap is a statement about this
+  configuration, not about the architectures in general.
+- With 151 test molecules and a single seed, differences of a few hundredths
+  are within noise; no confidence intervals are reported for the table above.
+- Temperature scaling improved ECE and NLL for the GNNs, but not for the
+  baseline (`T` < 1, ECE and NLL slightly worse), so it should not be assumed
+  to help every model.
+- Conformal coverage is close to but slightly below 0.90 for the GNNs and is
+  lower for inhibitors than non-inhibitors for every model, consistent with
+  scaffold shift between the calibration and test splits. Coverage is
+  descriptive, not guaranteed.
+
+The configuration, metrics, split counts, and the split archive are retained in
+the MLflow experiment `bace-comparison`; the table is also written to
+`data/MoleculeNet/bace/output/comparison/comparison.csv`.
+
+### Data audit
+
+`python app.py audit` (or `python src/audit_splits.py`) writes
+`data/MoleculeNet/bace/output/split_audit.json`:
+
+- **Class semantics.** `Class` 1 is a BACE-1 inhibitor and 0 is a non-inhibitor.
+  This is the source MoleculeNet label, not a strict pIC50 cutoff: every
+  class-0 molecule has pIC50 < 7, and 674 of 691 class-1 molecules have
+  pIC50 ≥ 7 (17 class-1 molecules lie below 7).
+- **Partitions.** 1,513 molecules in total (822 class 0, 691 class 1); the four
+  partitions are disjoint and cover every molecule.
+- **Graphs.** The number of processed graphs equals the number of molecules in
+  every partition; no SMILES was skipped.
+
+| Partition | Molecules | Class 0 | Class 1 | Processed graphs |
+|---|---:|---:|---:|---:|
+| Train | 1,060 | 576 | 484 | 1,060 |
+| Validation | 151 | 82 | 69 | 151 |
+| Calibration | 151 | 82 | 69 | 151 |
+| Test | 151 | 82 | 69 | 151 |
 
 ## Repository structure
 
@@ -127,6 +182,8 @@ bace-alzheimers-classification/
     ├── inference.py
     ├── calibration.py
     ├── conformal.py
+    ├── audit_splits.py
+    ├── compare_models.py
     └── mlflow_utils.py
 ```
 
@@ -184,10 +241,14 @@ The default experiments are:
 
 ## Results
 
+See [Current results](#current-results) for the revised-protocol comparison.
+
+### Historical results (superseded)
+
 The table below is a historical result from an earlier training implementation
-in which test accuracy influenced checkpoint selection; it is optimistic and
-is not reproduced by the current code, which no longer scores the test split
-during training. Regenerate results by running the pipeline.
+in which test accuracy influenced checkpoint selection. It is optimistic, was
+obtained under a different protocol, and is not reproduced by the current code;
+do not compare it with the current results.
 
 | Metric | Score |
 |---|---:|
@@ -196,10 +257,15 @@ during training. Regenerate results by running the pipeline.
 | Balanced accuracy | 0.8178144255164914 |
 | Inhibitor F1 | 0.8242074927953891 |
 
-The current GNN code keeps the checkpoint with the highest **validation
-accuracy** (early stopping patience of 20 epochs). Training logs train and
-validation metrics by epoch and `best_validation_accuracy`; it does not score
-the calibration or test splits. Each PyTorch model is saved under
+### Checkpoint selection in the current code
+
+The GNN code keeps the checkpoint with the highest **validation PR-AUC**,
+evaluated every 5 epochs, with early stopping after 20 evaluations without
+improvement (patience counts evaluations, not epochs). The baselines select the
+estimator by validation PR-AUC as well, so every model family uses the same
+criterion. Training logs train and validation metrics by epoch and
+`best_validation_pr_auc`; it does not score the calibration or test splits.
+Each PyTorch model is saved under
 its model-specific artifact path (`GCN-Model`, `GAT-Model`, or
 `GATGraphTransformer-Model`). Local state-dict checkpoints default to
 `model\GCN.pth`, `model\GAT.pth`, and `model\GATGraphTransformer.pth`.
@@ -341,7 +407,7 @@ Data roles in the current code:
 | Split | Used for |
 |---|---|
 | Train | Fitting model parameters. |
-| Validation | GNN checkpoint selection (best validation accuracy) and early stopping, baseline selection (validation PR-AUC), and fitting `T`. |
+| Validation | GNN checkpoint selection and early stopping and baseline selection (all by validation PR-AUC), and fitting `T`. |
 | Calibration | Used to fit the split-conformal nonconformity threshold; not used for temperature fitting or model selection. Baseline final metrics may also be reported on it. |
 | Test | Final evaluation only: calibration metrics, bootstrap intervals, and conformal coverage/set-size metrics. |
 
@@ -349,7 +415,7 @@ Calibration is a separate downstream stage: training writes only the labelled ra
 
 - `python app.py gnn ...` trains, writes validation/calibration/test prediction CSVs, then runs temperature calibration and conformal evaluation for that model.
 - `python app.py baseline` selects the baseline by validation PR-AUC, writes its validation/calibration/test prediction CSVs (log of `predict_proba` as logits), then runs temperature calibration and conformal evaluation for the selected model.
-- Snakemake runs `calibrate_gnn` after each `train_gnn`.
+- Snakemake runs `calibrate_gnn` and `conformal_gnn` after each `train_gnn`, plus `calibrate_baseline`/`conformal_baseline` for the selected baseline, then `audit` and `compare`.
 
 Each temperature calibration compares uncalibrated and scaled probabilities on the same test samples using Brier score, negative log-likelihood (NLL), and expected calibration error (ECE). Do not select models, temperatures, or thresholds from test metrics. Validation also drives checkpoint selection, so the temperature fit is not fully independent of it. The conformal stage uses the separate calibration split to fit a finite-sample threshold and evaluates prediction-set coverage and size on test. Temperature scaling changes the probability inputs to conformal prediction but does not use calibration or test labels to fit its temperature.
 
@@ -368,7 +434,7 @@ data/MoleculeNet/bace/output/conformal/<ModelName>/conformal_predictions.csv    
 data/MoleculeNet/bace/output/conformal/<ModelName>/conformal_report.json         # coverage, set size, class/group summaries
 ```
 
-Calibration runs also log to the MLflow experiment `bace-calibration` (run tagged with `model`; metrics `temperature` and `test_{uncalibrated,calibrated}_{brier,nll,ece}`; artifacts under `calibration/`). Conformal runs log coverage, threshold, and prediction-set metrics to `bace-conformal`, with report and per-sample predictions under `conformal/`. Training runs no longer carry downstream calibration/conformal metrics. Snakemake declares the calibration JSON, diagram, table and report as outputs of `calibrate_gnn`; run conformal evaluation separately with the command below.
+Calibration runs also log to the MLflow experiment `bace-calibration` (run tagged with `model`; metrics `temperature` and `test_{uncalibrated,calibrated}_{brier,nll,ece}`; artifacts under `calibration/`). Conformal runs log coverage, threshold, and prediction-set metrics to `bace-conformal`, with report and per-sample predictions under `conformal/`. Training runs no longer carry downstream calibration/conformal metrics. Snakemake declares the calibration JSON, diagram, table and report as outputs of `calibrate_gnn` and the conformal report as an output of `conformal_gnn`; you can also run conformal evaluation separately with the command below.
 
 The JSON has a `schema_version`, records `positive_class` (class 1 = BACE-1 inhibitor), and loading it with `expected_model` refuses a temperature fitted for a different model. MLflow no longer receives calibration metrics from training; the calibration stage logs them itself (below).
 
@@ -410,7 +476,19 @@ For example, to evaluate a previously trained GAT whose calibration CSV is absen
 python app.py conformal --model-type GAT
 ```
 
-The same command works for GCN, GATGraphTransformer, and `best-baseline` when their corresponding saved prediction files exist. Explicit CSV inputs remain available for custom workflows. The separate calibration split is used to fit the finite-sample threshold; the test split is only used to report empirical coverage, prediction-set size, and related metrics.
+The same command works for GCN, GATGraphTransformer, and `best-baseline` when their corresponding saved prediction files exist. Explicit CSV inputs remain available for custom workflows. The separate calibration split is used to fit the conformal classifier; the test split is only used to report empirical coverage, prediction-set size, and related metrics.
+
+Prediction sets are built with [`crepes`](https://github.com/henrikbostrom/crepes) (`crepes==0.9.1`, in `requirements.txt`): a `ConformalClassifier` is fitted on the calibration nonconformity scores (`1 - P(true class)`, from temperature-scaled probabilities) and queried with smoothing disabled. The reported `nonconformity_threshold` is the finite-sample quantile of those scores.
+
+### Audit and model comparison
+
+```bash
+python app.py audit                    # class semantics, per-split counts, processed-graph counts
+python app.py compare                  # compare existing artifacts on the shared split
+python app.py compare --retrain        # retrain baseline + GCN/GAT/hybrid first, then compare
+```
+
+`compare` checks that every model's validation, calibration, and test labels match the split labels (it fails otherwise), writes `output/comparison/comparison.{csv,json}`, and logs one run to the MLflow experiment `bace-comparison`. `--retrain` accepts `--epochs`, `--hidden-channels`, `--learning-rate`, `--batch-size`, and `--confidence`. The Snakemake workflow runs the equivalent `conformal_*`, `audit`, and `compare` rules.
 
 Run the stage again for an existing model:
 
@@ -556,7 +634,20 @@ Execute the workflow:
 snakemake --cores 1
 ```
 
-The workflow orchestrates scaffold splitting, fingerprint generation, baseline training, graph-model training, and per-GNN calibration (`calibrate_gnn`, which reads the saved validation/test logits and can be rerun without retraining) according to `config.yaml`. Baselines are calibrated through `python app.py calibrate --model-type best-baseline` because the winning baseline is only known after training. Snakemake paths are built with `os.path.join`; set `python` in `config.yaml` (or `--config python=...`) to the interpreter that has the project dependencies.
+The workflow (`config.yaml` drives all parameters, including the conformal `confidence`, default 0.90) runs these stages; `rule all` requests every final artifact:
+
+| Rule | Purpose | Key outputs |
+|---|---|---|
+| `split`, `fingerprints` | Scaffold split (train/validation/calibration/test) and Morgan fingerprints. | `clean/train_test_split.npz`, `fingerprints/*` |
+| `baselines` | Trains the classical baselines and selects one by validation PR-AUC. | `output/predictions/selected_baseline.json`, baseline prediction CSVs including `calibration_predictions.csv` |
+| `train_gnn` | Trains each GNN in `gnn_models`, selecting checkpoints by validation PR-AUC. | `model/<model>.pth`, validation/calibration/test prediction CSVs |
+| `calibrate_gnn` | Temperature scaling fitted on validation logits, evaluated on test; reruns without retraining. | `model/<model>.calibration.json`, `output/calibration/<model>/*` |
+| `conformal_gnn` | `crepes` conformal sets fitted on the calibration split, reported on test. | `output/conformal/<model>/conformal_report.json` |
+| `calibrate_baseline`, `conformal_baseline` | Same two steps for the selected baseline, via `app.py ... --model-type best-baseline` (its name is only known after training). Tracked with marker files. | `output/calibration/best-baseline.done`, `output/conformal/best-baseline.done` |
+| `audit` | Class semantics, per-split counts, processed-graph counts. | `output/split_audit.json` |
+| `compare` | One comparison on the shared split; fails if any model's labels differ from the split. Logs to MLflow `bace-comparison`. | `output/comparison/comparison.{csv,json}` |
+
+Run a single stage by naming its output, for example `snakemake --cores 1 data/MoleculeNet/bace/output/comparison/comparison.csv`. Snakemake paths are built with `os.path.join`; set `python` in `config.yaml` (or `--config python=...`) to the interpreter that has the project dependencies. Changing a config value such as `epochs` retrains only the stages that depend on it as Snakemake detects changes; use `snakemake --cores 1 --forcerun train_gnn` to force a full retrain of the models. Conformal and comparison reports reflect whichever predictions were present when they were produced, so rerun them after retraining.
 
 ## MLflow experiment tracking
 
@@ -579,6 +670,7 @@ The default experiments are:
 | `bace-gnn` | GNN training, metrics, and model artifacts. |
 | `bace-calibration` | Temperature-scaling metrics and artifacts. |
 | `bace-conformal` | Prediction-set coverage, size metrics, and artifacts. |
+| `bace-comparison` | One run per comparison: configuration, split counts, per-model metrics (`<model>_<metric>`), the split archive, and comparison tables. |
 
 Tracking settings can be configured using `MLFLOW_TRACKING_URI` or the supported command-line options.
 
@@ -586,7 +678,9 @@ Tracking settings can be configured using `MLFLOW_TRACKING_URI` or the supported
 
 Several limitations should be addressed before treating the current results as a reliable estimate of prospective molecular activity prediction.
 
-**Validation reuse.** Checkpoints are selected on the validation split, which is also used to fit the calibration temperature, so the temperature is not fitted on fully independent data. The test split is used only for final evaluation. Reported results in this README predate that fix and should be regenerated.
+**Validation reuse.** Checkpoints are selected on the validation split (by PR-AUC), which is also used to fit the calibration temperature, so the temperature is not fitted on fully independent data. The test split is used only for final evaluation. The [current results](#current-results) were produced with this protocol; the [historical GNN results](#historical-results-superseded) were not and should not be compared with them.
+
+**Single run.** The comparison uses one seed, one fixed split, and default GNN hyperparameters (100 epochs, no search). Differences between models are not accompanied by confidence intervals and the GNNs may be under-trained.
 
 **Limited dataset size.** With approximately 1,530 molecules, model performance estimates and calibration metrics may be sensitive to the composition of the data partitions.
 
@@ -629,19 +723,19 @@ The next development phase will focus on reliable molecular prediction rather th
 
 ~~**Status: implemented** (see [Probability calibration](#probability-calibration)). Temperature scaling is fitted on validation logits and evaluated on the test split with Brier score, NLL, ECE, reliability diagrams (with per-bin counts) and paired bootstrap intervals. Still planned: an independent temperature-fitting set (for example cross-fitting) and scaffold-aware uncertainty intervals; the current bootstrap intervals are optimistic (see above).~~
 
-### 3. Conformal prediction
+~~### 3. Conformal prediction~~
 
-**Status: implemented.** The pipeline fits split-conformal thresholds on the held-out calibration predictions and evaluates test prediction sets (see [Split conformal prediction](#split-conformal-prediction)). Further work should investigate calibration strategies and coverage under scaffold distribution shift.
+~~**Status: implemented.** The pipeline fits split-conformal thresholds on the held-out calibration predictions and evaluates test prediction sets (see [Split conformal prediction]~~(#split-conformal-prediction)). Further work should investigate calibration strategies and coverage under scaffold distribution shift.~~
 
-Current reports include:
+~~Current reports include:~~
 
-- Empirical coverage
-- Average prediction-set size
-- Singleton prediction rate
-- Coverage by activity class
-- Coverage across scaffold novelty or molecular similarity groups
+~~- Empirical coverage~~
+~~- Average prediction-set size~~
+~~- Singleton prediction rate~~
+~~- Coverage by activity class~~
+~~- Coverage across scaffold novelty or molecular similarity groups~~
 
-The nominal coverage target does not guarantee the same coverage under arbitrary distribution shift. This is particularly important when evaluating previously unseen molecular scaffolds.
+~~The nominal coverage target does not guarantee the same coverage under arbitrary distribution shift. This is particularly important when evaluating previously unseen molecular scaffolds.~~
 
 ### 4. Uncertainty quantification
 
@@ -667,9 +761,7 @@ Explanations should be evaluated for fidelity and stability across model seeds. 
 
 ### 6. Comparative evaluation
 
-After correcting the evaluation protocol, compare the classical baselines and graph models under consistent conditions.
-
-The goal is to establish whether graph-based learning improves prediction quality over molecular fingerprints and whether the more complex hybrid architecture provides a meaningful advantage.
+A first single-split, single-seed comparison is complete (see [Current results](#current-results)); the Morgan baseline outperformed GCN, GAT, and the hybrid model. What remains is to establish whether that holds with multiple seeds, longer GNN training or tuning, and additional scaffold splits, with confidence intervals.
 
 ### 7. Generalization to other molecular targets
 

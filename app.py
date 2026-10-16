@@ -361,6 +361,53 @@ class PipelineRunner:
         arguments.extend(self._tracking_arguments("bace-conformal"))
         self._run("conformal.py", arguments)
 
+    def run_audit(self) -> None:
+        self._require_file(self.paths.raw_csv)
+        self._require_file(self.paths.split_file)
+        self._run(
+            "audit_splits.py",
+            [
+                "--dataset-path",
+                str(self.paths.dataset_root),
+                "--output",
+                str(self.paths.output_directory / "split_audit.json"),
+            ],
+        )
+
+    def run_comparison(
+        self,
+        epochs: int = 100,
+        hidden_channels: int = 64,
+        learning_rate: float = 0.01,
+        batch_size: int = 32,
+        confidence: float = 0.90,
+        retrain: bool = False,
+    ) -> None:
+        self.run_audit()
+        if retrain:
+            self.run_baselines()
+            self.run_all_gnn_training(epochs, hidden_channels, learning_rate, batch_size)
+        self._run(
+            "compare_models.py",
+            [
+                "--dataset-path",
+                str(self.paths.dataset_root),
+                "--epochs",
+                str(epochs),
+                "--hidden-channels",
+                str(hidden_channels),
+                "--learning-rate",
+                str(learning_rate),
+                "--batch-size",
+                str(batch_size),
+                "--confidence",
+                str(confidence),
+                "--mlflow-experiment",
+                "bace-comparison",
+                *(["--mlflow-tracking-uri", self.tracking_uri] if self.tracking_uri else []),
+            ],
+        )
+
     def _resolve_model_type(self, model_type: str | None) -> str | None:
         if model_type != BEST_BASELINE:
             return model_type
@@ -607,6 +654,28 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_arguments(conformal_parser)
     _add_conformal_arguments(conformal_parser)
 
+    audit_parser = commands.add_parser(
+        "audit",
+        help="Audit labels, per-class split counts, and processed graph counts.",
+    )
+    _add_common_arguments(audit_parser)
+
+    compare_parser = commands.add_parser(
+        "compare",
+        help="Compare the baseline, GCN, GAT, and hybrid model on identical splits (logged to MLflow).",
+    )
+    _add_common_arguments(compare_parser)
+    compare_parser.add_argument("--epochs", type=int, default=100)
+    compare_parser.add_argument("--hidden-channels", type=int, default=64)
+    compare_parser.add_argument("--learning-rate", type=float, default=0.01)
+    compare_parser.add_argument("--batch-size", type=int, default=32)
+    compare_parser.add_argument("--confidence", type=_confidence_level, default=0.90)
+    compare_parser.add_argument(
+        "--retrain",
+        action="store_true",
+        help="Retrain the baselines and every GNN (with calibration and conformal) before comparing.",
+    )
+
     all_parser = commands.add_parser(
         "all",
         help="Run split, fingerprints, model training, calibration, and conformal evaluation.",
@@ -688,6 +757,17 @@ def main() -> None:
             confidence=args.confidence,
             groups=args.groups,
         )
+    elif args.command == "audit":
+        runner.run_audit()
+    elif args.command == "compare":
+        runner.run_comparison(
+            epochs=args.epochs,
+            hidden_channels=args.hidden_channels,
+            learning_rate=args.learning_rate,
+            batch_size=args.batch_size,
+            confidence=args.confidence,
+            retrain=args.retrain,
+        )
     else:
         runner.run_complete_pipeline(
             args.model,
@@ -731,6 +811,10 @@ if __name__ == "__main__":
 # python app.py calibrate --model-type best-baseline
 # python app.py conformal --model-type GCN
 # python app.py conformal --model-type best-baseline
+
+# Audit splits, then run one clean comparison logged to MLflow
+# python app.py audit
+# python app.py compare --retrain
 
 # Run test inference from a tracked MLflow model
 # python app.py inference `
