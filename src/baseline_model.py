@@ -16,6 +16,7 @@ from sklearn.base import clone
 
 from mlflow_utils import configure_mlflow, log_parameters
 from calibration import (
+    calibration_prediction_path,
     probabilities_to_logits,
     prediction_paths,
     save_predictions,
@@ -169,14 +170,21 @@ if __name__ == "__main__":
         print(f"Final evaluation results for {best_name}: {final_results}")
 
         validation_probabilities = best_clf.predict_proba(validation_data.values)
+        calibration_probabilities = best_clf.predict_proba(calibration_data.values)
         test_probabilities = best_clf.predict_proba(test_data.values)
         validation_logits = probabilities_to_logits(validation_probabilities)
+        calibration_logits = probabilities_to_logits(calibration_probabilities)
         test_logits = probabilities_to_logits(test_probabilities)
         predictions_dir = args.predictions_dir or os.path.join(
             args.confusion_matrix_path or "model", "predictions"
         )
         validation_predictions_path, test_predictions_path = prediction_paths(predictions_dir, best_name)
         save_predictions(validation_labels.values.ravel(), validation_logits, validation_predictions_path)
+        save_predictions(
+            calibration_labels.values.ravel(),
+            calibration_logits,
+            calibration_prediction_path(predictions_dir, best_name),
+        )
         save_predictions(test_labels.values.ravel(), test_logits, test_predictions_path)
         Path(predictions_dir).mkdir(parents=True, exist_ok=True)
         Path(predictions_dir, "selected_baseline.json").write_text(

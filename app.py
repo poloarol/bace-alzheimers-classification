@@ -141,6 +141,7 @@ class PipelineRunner:
             ],
         )
         self.run_calibration(BEST_BASELINE, None, None, None, None, 10)
+        self.run_conformal(BEST_BASELINE)
 
     def run_gnn_training(
         self,
@@ -175,6 +176,7 @@ class PipelineRunner:
             ],
         )
         self.run_calibration(model, None, None, None, None, 10)
+        self.run_conformal(model)
 
     def run_all_gnn_training(
         self,
@@ -238,14 +240,7 @@ class PipelineRunner:
         bins: int,
         bootstrap: int = 1000,
     ) -> None:
-        if model_type == BEST_BASELINE:
-            selection = self.paths.predictions_directory / "selected_baseline.json"
-            self._require_file(selection)
-            model_type = (
-                "<selected-baseline>"
-                if self.dry_run
-                else json.loads(selection.read_text(encoding="utf-8"))["model"]
-            )
+        model_type = self._resolve_model_type(model_type)
         if model_type:
             model_directory = self.paths.predictions_directory / model_type
             validation_predictions = validation_predictions or str(
@@ -286,6 +281,94 @@ class PipelineRunner:
             arguments.extend(["--temperature-output", temperature_output])
         arguments.extend(self._tracking_arguments("bace-calibration"))
         self._run("calibration.py", arguments)
+
+    def run_conformal(
+        self,
+        model_type: str | None = None,
+        calibration_predictions: str | None = None,
+        test_predictions: str | None = None,
+        output_directory: str | None = None,
+        confidence: float = 0.90,
+        groups: str | None = None,
+        temperature_file: str | None = None,
+    ) -> None:
+        model_type = self._resolve_model_type(model_type)
+        if model_type:
+            model_directory = self.paths.predictions_directory / model_type
+            calibration_predictions = calibration_predictions or str(
+                model_directory / "calibration_predictions.csv"
+            )
+            test_predictions = test_predictions or str(
+                model_directory / "test_predictions.csv"
+            )
+        if not (calibration_predictions and test_predictions):
+            raise SystemExit(
+                "Provide --model-type, or both --calibration-predictions and --test-predictions."
+            )
+        if (
+            model_type in GNN_MODELS
+            and calibration_predictions == str(
+                self.paths.predictions_directory
+                / model_type
+                / "calibration_predictions.csv"
+            )
+            and not Path(calibration_predictions).is_file()
+        ):
+            checkpoint = self.paths.model_directory / f"{model_type}.pth"
+            self._require_file(checkpoint)
+            self._run(
+                "train.py",
+                [
+                    "--export-calibration-predictions",
+                    "--dataset_path",
+                    str(self.paths.dataset_root),
+                    "--predictions-dir",
+                    str(self.paths.predictions_directory),
+                    "--model",
+                    model_type,
+                    "--model-output",
+                    str(checkpoint),
+                ],
+            )
+        self._require_file(Path(calibration_predictions))
+        self._require_file(Path(test_predictions))
+        if groups:
+            self._require_file(Path(groups))
+
+        output_directory = output_directory or str(
+            self.paths.output_directory / "conformal" / (model_type or "custom")
+        )
+        if temperature_file is None and model_type:
+            candidate = self.paths.model_directory / f"{model_type}.calibration.json"
+            if candidate.is_file() or self.dry_run:
+                temperature_file = str(candidate)
+        arguments = [
+            "--calibration-predictions",
+            calibration_predictions,
+            "--test-predictions",
+            test_predictions,
+            "--output-dir",
+            output_directory,
+            "--confidence",
+            str(confidence),
+        ]
+        if model_type:
+            arguments.extend(["--model-name", model_type])
+        if temperature_file:
+            arguments.extend(["--temperature-file", temperature_file])
+        if groups:
+            arguments.extend(["--groups", groups])
+        arguments.extend(self._tracking_arguments("bace-conformal"))
+        self._run("conformal.py", arguments)
+
+    def _resolve_model_type(self, model_type: str | None) -> str | None:
+        if model_type != BEST_BASELINE:
+            return model_type
+        selection = self.paths.predictions_directory / "selected_baseline.json"
+        self._require_file(selection)
+        if self.dry_run:
+            return "<selected-baseline>"
+        return json.loads(selection.read_text(encoding="utf-8"))["model"]
 
     def _checkpoint_for(self, model_type: str | None) -> str | None:
         if not model_type:
@@ -396,6 +479,16 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _confidence_level(value: str) -> float:
+    try:
+        confidence = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number.")
+    if not 0.0 < confidence < 1.0:
+        raise argparse.ArgumentTypeError("must be between 0 and 1.")
+    return confidence
+
+
 def _add_inference_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
     parser.add_argument("--model-uri", required=required)
     parser.add_argument(
@@ -404,6 +497,39 @@ def _add_inference_arguments(parser: argparse.ArgumentParser, required: bool) ->
         required=required,
     )
     parser.add_argument("--model-type", required=required)
+
+
+def _add_conformal_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--model-type",
+        help="Model whose saved predictions to evaluate, or 'best-baseline'.",
+    )
+    parser.add_argument(
+        "--calibration-predictions",
+        help="Explicit calibration CSV with label plus logit_0/logit_1 or probability.",
+    )
+    parser.add_argument(
+        "--test-predictions",
+        help="Explicit test CSV with the same columns.",
+    )
+    parser.add_argument(
+        "--temperature-file",
+        help="Optional temperature-scaling JSON; inferred from --model-type when available.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        help="Directory for the conformal report and prediction sets.",
+    )
+    parser.add_argument(
+        "--confidence",
+        type=_confidence_level,
+        default=0.90,
+        help="Target marginal coverage in (0, 1); defaults to 0.90.",
+    )
+    parser.add_argument(
+        "--groups",
+        help="Optional headerless CSV with one group value per test sample.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -474,7 +600,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bootstrap resamples for test-set metric intervals (0 disables).",
     )
 
-    all_parser = commands.add_parser("all", help="Run split, fingerprints, baselines, and GNN training.")
+    conformal_parser = commands.add_parser(
+        "conformal",
+        help="Fit conformal sets on calibration predictions and evaluate on test predictions.",
+    )
+    _add_common_arguments(conformal_parser)
+    _add_conformal_arguments(conformal_parser)
+
+    all_parser = commands.add_parser(
+        "all",
+        help="Run split, fingerprints, model training, calibration, and conformal evaluation.",
+    )
     _add_common_arguments(all_parser)
     _add_split_arguments(all_parser)
     _add_fingerprint_arguments(all_parser)
@@ -534,13 +670,23 @@ def main() -> None:
         )
     elif args.command == "calibrate":
         runner.run_calibration(
-            args.model_type,
-            args.validation_predictions,
-            args.test_predictions,
-            args.output_dir,
-            args.temperature_output,
-            args.bins,
-            args.bootstrap,
+            model_type=args.model_type,
+            validation_predictions=args.validation_predictions,
+            test_predictions=args.test_predictions,
+            output_directory=args.output_dir,
+            temperature_output=args.temperature_output,
+            bins=args.bins,
+            bootstrap=args.bootstrap,
+        )
+    elif args.command == "conformal":
+        runner.run_conformal(
+            model_type=args.model_type,
+            calibration_predictions=args.calibration_predictions,
+            test_predictions=args.test_predictions,
+            output_directory=args.output_dir,
+            temperature_file=args.temperature_file,
+            confidence=args.confidence,
+            groups=args.groups,
         )
     else:
         runner.run_complete_pipeline(
@@ -582,6 +728,9 @@ if __name__ == "__main__":
 # python app.py gnn --model GAT --epochs 100
 # python app.py gnn --model GATGraphTransformer --epochs 100
 # python app.py gnn --all-models --epochs 100
+# python app.py calibrate --model-type best-baseline
+# python app.py conformal --model-type GCN
+# python app.py conformal --model-type best-baseline
 
 # Run test inference from a tracked MLflow model
 # python app.py inference `

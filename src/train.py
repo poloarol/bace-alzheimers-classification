@@ -18,7 +18,11 @@ from tqdm import trange
 
 
 from model import build_model
-from calibration import prediction_paths, save_predictions
+from calibration import (
+    calibration_prediction_path,
+    prediction_paths,
+    save_predictions,
+)
 from dataset import MoleculeDataset
 from mlflow_utils import configure_mlflow, log_parameters
 
@@ -80,6 +84,50 @@ def evaluate_for_model_selection(model, train_loader, validation_loader):
     )
 
 
+def export_calibration_predictions(
+    model_type: str,
+    dataset_path: str,
+    checkpoint_path: str,
+    predictions_directory: str,
+    batch_size: int,
+) -> str:
+    """Export calibration logits from an existing checkpoint without retraining."""
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=True,
+    )
+    if not isinstance(checkpoint, dict) or "lin.weight" not in checkpoint:
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} is not a supported model state dictionary."
+        )
+    hidden_channels = int(checkpoint["lin.weight"].shape[1])
+
+    calibration_dataset = MoleculeDataset(
+        root=dataset_path,
+        filename="bace_processed.csv",
+        split="calibration",
+    )
+    if not calibration_dataset:
+        raise ValueError("The calibration dataset is empty.")
+    calibration_loader = DataLoader(
+        calibration_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+    model = build_model(
+        model_type=model_type,
+        hidden_channels=hidden_channels,
+        data=calibration_dataset,
+    ).to(device)
+    model.load_state_dict(checkpoint)
+    labels, logits = collect_predictions(model, calibration_loader)
+    output_path = calibration_prediction_path(predictions_directory, model_type)
+    save_predictions(labels, logits, output_path)
+    print(f"Saved calibration-split predictions to: {output_path}")
+    return str(output_path)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate a graph model.")
     parser.add_argument(
@@ -101,13 +149,34 @@ if __name__ == "__main__":
     parser.add_argument(
         "--predictions-dir",
         default=None,
-        help="Directory for validation/test logit CSVs used by calibration. "
+        help="Directory for prediction CSVs used by calibration and conformal evaluation. "
         "Defaults to <dataset_path>/output/predictions.",
+    )
+    parser.add_argument(
+        "--export-calibration-predictions",
+        action="store_true",
+        help="Export calibration logits from --model-output without retraining.",
     )
     parser.add_argument("--mlflow-experiment", default="bace-gnn", help="MLflow experiment name.")
     parser.add_argument("--mlflow-tracking-uri", help="MLflow tracking URI. Defaults to MLFLOW_TRACKING_URI or ./mlruns.")
     
     args = parser.parse_args()
+
+    predictions_dir = args.predictions_dir or os.path.join(
+        args.dataset_path, "output", "predictions"
+    )
+    model_output = os.path.abspath(
+        args.model_output or os.path.join("model", f"{args.model}.pth")
+    )
+    if args.export_calibration_predictions:
+        export_calibration_predictions(
+            model_type=args.model,
+            dataset_path=args.dataset_path,
+            checkpoint_path=model_output,
+            predictions_directory=predictions_dir,
+            batch_size=args.batch_size,
+        )
+        raise SystemExit(0)
 
     configure_mlflow(args.mlflow_experiment, args.mlflow_tracking_uri)
     mlflow.start_run(run_name=args.model)
@@ -148,10 +217,12 @@ if __name__ == "__main__":
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False)
+    calibration_loader = DataLoader(calibration_dataset, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     train_loader = [(data.to(device)) for data in train_loader]
     validation_loader = [(data.to(device)) for data in validation_loader]
+    calibration_loader = [(data.to(device)) for data in calibration_loader]
     test_loader = [(data.to(device)) for data in test_loader]
     
     model = build_model(
@@ -160,7 +231,6 @@ if __name__ == "__main__":
         data=train_dataset,
     )
     model = model.to(device)
-    model_class_name = model.__class__.__name__
     
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     criterion = torch.nn.CrossEntropyLoss()
@@ -224,15 +294,19 @@ if __name__ == "__main__":
 
     model.load_state_dict(best_model_state)
     mlflow.log_metric("best_validation_accuracy", best_val_acc)
-    # The calibration and test splits are not scored here. Training only writes the
-    # labelled raw logits; final test results come from the downstream calibration stage.
+    # These held-out logits are consumed by temperature calibration and conformal evaluation.
     validation_labels, validation_logits = collect_predictions(model, validation_loader)
+    calibration_labels, calibration_logits = collect_predictions(model, calibration_loader)
     test_labels, test_logits = collect_predictions(model, test_loader)
-    predictions_dir = args.predictions_dir or os.path.join(args.dataset_path, "output", "predictions")
     validation_predictions_path, test_predictions_path = prediction_paths(
         predictions_dir, args.model
     )
     save_predictions(validation_labels, validation_logits, validation_predictions_path)
+    save_predictions(
+        calibration_labels,
+        calibration_logits,
+        calibration_prediction_path(predictions_dir, args.model),
+    )
     save_predictions(test_labels, test_logits, test_predictions_path)
     mlflow.log_artifacts(os.path.dirname(validation_predictions_path), artifact_path="predictions")
     print(f"Saved calibration inputs to: {os.path.dirname(validation_predictions_path)}")
@@ -243,9 +317,6 @@ if __name__ == "__main__":
     )
     mlflow.end_run()
     
-    model_output = os.path.abspath(
-        args.model_output or os.path.join("model", f"{model_class_name}.pth")
-    )
     os.makedirs(os.path.dirname(model_output), exist_ok=True)
     torch.save(model.state_dict(), model_output)
         

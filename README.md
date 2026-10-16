@@ -2,7 +2,7 @@
 
 A molecular machine learning project comparing classical machine learning and graph neural networks for predicting whether a small molecule inhibits beta-secretase 1 (BACE-1).
 
-The project combines molecular graph learning, cheminformatics, scaffold-aware evaluation, experiment tracking, and reproducible workflow automation. Temperature-scaling calibration is implemented; the next development phase will focus on explainability and uncertainty-aware predictions.
+The project combines molecular graph learning, cheminformatics, scaffold-aware evaluation, probability calibration, split conformal prediction, experiment tracking, and reproducible workflow automation. The conformal stage reports prediction sets and empirical coverage; future work will focus on explainability and broader uncertainty analysis.
 
 - BACE molecule graph processing with DeepChem and PyTorch Geometric.
 - Scaffold-aware, stratified train/validation/calibration/test splitting.
@@ -16,6 +16,7 @@ The project combines molecular graph learning, cheminformatics, scaffold-aware e
 - GAT combined with graph Transformer convolution training.
 - MLflow tracking for preprocessing and model experiments.
 - Test-set inference for scikit-learn and PyTorch models.
+- Temperature scaling and split conformal prediction sets.
 - Confusion-matrix export as both PNG and TXT.
 - A pipeline runner for complete or individual workflow stages.
 
@@ -125,6 +126,7 @@ bace-alzheimers-classification/
     ├── stratified_scaffold_split.py
     ├── inference.py
     ├── calibration.py
+    ├── conformal.py
     └── mlflow_utils.py
 ```
 
@@ -140,6 +142,7 @@ bace-alzheimers-classification/
 | `stratified_scaffold_split.py` | Scaffold-aware dataset splitting. |
 | `inference.py` | Model inference, confusion matrices, and optional calibrated probabilities. |
 | `calibration.py` | Temperature fitting, Brier/NLL/ECE metrics, reliability diagrams, and the calibration JSON/report CLI. |
+| `conformal.py` | Split conformal prediction sets and coverage evaluation on held-out calibration and test predictions. |
 | `mlflow_utils.py` | Shared MLflow configuration. |
 | `app.py` | Command-line pipeline runner. |
 | `Snakefile` | Workflow automation. |
@@ -176,6 +179,8 @@ The default experiments are:
 | `bace-preprocessing` | Scaffold splits and Morgan fingerprints |
 | `bace-baseline` | Random Forest, Logistic Regression, and Gradient Boosting |
 | `bace-gnn` | GCN, GAT, and GATGraphTransformer training, metrics, and logged models |
+| `bace-calibration` | Temperature-scaling metrics and artifacts |
+| `bace-conformal` | Prediction-set coverage, size metrics, and artifacts |
 
 ## Results
 
@@ -251,7 +256,7 @@ Use `--radius` and `--n-bits` to change the fingerprint configuration.
 python app.py baseline
 ```
 
-This trains the Logistic Regression, Random Forest, and Gradient Boosting baselines and scores them on the validation split. The best model by validation PR-AUC is selected; only that model is then evaluated on the calibration and test splits and temperature-calibrated (see [Probability calibration](#probability-calibration)).
+This trains the Logistic Regression, Random Forest, and Gradient Boosting baselines and scores them on the validation split. The best model by validation PR-AUC is selected; only that model's held-out predictions are then temperature-calibrated and used for conformal evaluation.
 
 ### 4. Train a graph neural network
 
@@ -322,7 +327,7 @@ automatically under `data/MoleculeNet/bace/processed/`. The validation split
 controls checkpoint selection and early stopping. The GNN command logs
 epoch-level train and validation metrics and does not score the calibration or
 test splits; it only writes their raw logits, and final test results come from
-the calibration stage. Processed graph
+the calibration and conformal stages. Processed graph
 cache names include a hash of the split archive, so changing the split causes
 the affected datasets to be rebuilt automatically.
 Use `--hidden-channels` and `--learning-rate` to change model settings.
@@ -337,30 +342,33 @@ Data roles in the current code:
 |---|---|
 | Train | Fitting model parameters. |
 | Validation | GNN checkpoint selection (best validation accuracy) and early stopping, baseline selection (validation PR-AUC), and fitting `T`. |
-| Calibration | Not used by temperature scaling; reserved for future conformal prediction. |
-| Test | Final evaluation only: before/after calibration metrics and the bootstrap intervals. |
+| Calibration | Used to fit the split-conformal nonconformity threshold; not used for temperature fitting or model selection. Baseline final metrics may also be reported on it. |
+| Test | Final evaluation only: calibration metrics, bootstrap intervals, and conformal coverage/set-size metrics. |
 
 Calibration is a separate downstream stage: training writes only the labelled raw logits, and `src/calibration.py` is the single place that fits `T`, evaluates it on test, and writes the calibration artifact. This lets you recalibrate without retraining.
 
-- `python app.py gnn ...` trains, writes the prediction CSVs, then runs calibration for that model.
-- `python app.py baseline` selects the baseline by validation PR-AUC, writes its prediction CSVs (log of `predict_proba` as logits; the CSV `probability` column means P(class 1)), then calibrates the selected model.
+- `python app.py gnn ...` trains, writes validation/calibration/test prediction CSVs, then runs temperature calibration and conformal evaluation for that model.
+- `python app.py baseline` selects the baseline by validation PR-AUC, writes its validation/calibration/test prediction CSVs (log of `predict_proba` as logits), then runs temperature calibration and conformal evaluation for the selected model.
 - Snakemake runs `calibrate_gnn` after each `train_gnn`.
 
-Each calibration compares uncalibrated and temperature-scaled probabilities on the same test samples using Brier score, negative log-likelihood (NLL), and expected calibration error (ECE). Do not select models, temperatures, or thresholds from these test metrics. Validation also drives checkpoint selection, so the temperature fit is not fully independent of it. The calibration split is untouched, so it stays available for conformal prediction (a different method with its own exchangeability assumptions).
+Each temperature calibration compares uncalibrated and scaled probabilities on the same test samples using Brier score, negative log-likelihood (NLL), and expected calibration error (ECE). Do not select models, temperatures, or thresholds from test metrics. Validation also drives checkpoint selection, so the temperature fit is not fully independent of it. The conformal stage uses the separate calibration split to fit a finite-sample threshold and evaluates prediction-set coverage and size on test. Temperature scaling changes the probability inputs to conformal prediction but does not use calibration or test labels to fit its temperature.
 
 Outputs:
 
 ```text
 data/MoleculeNet/bace/output/predictions/<ModelName>/validation_predictions.csv   # label, logit_0, logit_1
+data/MoleculeNet/bace/output/predictions/<ModelName>/calibration_predictions.csv
 data/MoleculeNet/bace/output/predictions/<ModelName>/test_predictions.csv
 data/MoleculeNet/bace/output/predictions/selected_baseline.json                   # baseline only
 model/<ModelName>.calibration.json                                                # canonical artifact: T, model, checkpoint, class convention, counts, before/after metrics
 data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_diagram.png
 data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_table.csv
 data/MoleculeNet/bace/output/calibration/<ModelName>/calibration_report.json     # machine-readable before/after metrics, counts, binning, bootstrap intervals
+data/MoleculeNet/bace/output/conformal/<ModelName>/conformal_predictions.csv     # test labels, probabilities, predicted labels, prediction sets, set sizes
+data/MoleculeNet/bace/output/conformal/<ModelName>/conformal_report.json         # coverage, set size, class/group summaries
 ```
 
-Calibration runs also log to the MLflow experiment `bace-calibration` (run tagged with `model`; metrics `temperature` and `test_{uncalibrated,calibrated}_{brier,nll,ece}`; artifacts under `calibration/`). Training runs no longer carry calibration metrics. Snakemake declares the calibration JSON, diagram, table and report as outputs of `calibrate_gnn`.
+Calibration runs also log to the MLflow experiment `bace-calibration` (run tagged with `model`; metrics `temperature` and `test_{uncalibrated,calibrated}_{brier,nll,ece}`; artifacts under `calibration/`). Conformal runs log coverage, threshold, and prediction-set metrics to `bace-conformal`, with report and per-sample predictions under `conformal/`. Training runs no longer carry downstream calibration/conformal metrics. Snakemake declares the calibration JSON, diagram, table and report as outputs of `calibrate_gnn`; run conformal evaluation separately with the command below.
 
 The JSON has a `schema_version`, records `positive_class` (class 1 = BACE-1 inhibitor), and loading it with `expected_model` refuses a temperature fitted for a different model. MLflow no longer receives calibration metrics from training; the calibration stage logs them itself (below).
 
@@ -391,6 +399,47 @@ python app.py calibrate \
 ```
 
 **Calibrated inference.** `app.py inference` automatically passes `model/<model-type>.calibration.json` to `src/inference.py` when it exists (or pass `--calibration-file`). The model name must match the artifact. Scaling is applied to logits (log-probabilities for sklearn), never by dividing probabilities by `T`, and `calibrated_predictions.csv` is written next to the confusion matrix. A calibrated probability is not a validated estimate of prospective experimental success.
+
+### Split conformal prediction
+
+After training, the baseline and GNN commands automatically run conformal evaluation after temperature calibration. The runner expects each model's calibration and test CSVs under `data/MoleculeNet/bace/output/predictions/<ModelName>/`. If the calibration CSV is missing for a GNN (for example, it was trained before calibration-prediction export was added), `app.py conformal --model-type <GNN>` regenerates that file from the matching local checkpoint in `model/<GNN>.pth`, then continues with conformal evaluation. This is checkpoint inference only: it does not retrain or replace the model, and it uses the configured dataset's existing `clean/train_test_split.npz` calibration partition. The checkpoint, source dataset, and split file must exist; if the test prediction CSV is missing, rerun training to recreate the held-out prediction files. Baseline calibration predictions are produced during baseline training and are not reconstructed by this GNN checkpoint recovery path.
+
+For example, to evaluate a previously trained GAT whose calibration CSV is absent:
+
+```bash
+python app.py conformal --model-type GAT
+```
+
+The same command works for GCN, GATGraphTransformer, and `best-baseline` when their corresponding saved prediction files exist. Explicit CSV inputs remain available for custom workflows. The separate calibration split is used to fit the finite-sample threshold; the test split is only used to report empirical coverage, prediction-set size, and related metrics.
+
+Run the stage again for an existing model:
+
+```bash
+python app.py conformal --model-type GCN
+python app.py conformal --model-type best-baseline
+```
+
+`--model-type` locates calibration/test prediction CSVs and uses
+`model/<model-type>.calibration.json` when present. For explicit inputs, pass
+both prediction files; a temperature artifact can optionally be supplied with
+`--temperature-file`:
+
+```bash
+python app.py conformal \
+  --calibration-predictions calibration_predictions.csv \
+  --test-predictions test_predictions.csv \
+  --temperature-file model/GCN.calibration.json \
+  --confidence 0.90
+```
+
+The inputs follow the same CSV contract as temperature calibration: a `label`
+column plus `logit_0`/`logit_1` or a class-1 `probability` column. `--groups`
+accepts an optional headerless CSV with one group value per test sample and
+adds coverage and average-set-size summaries by group. Group summaries are
+descriptive; the marginal coverage guarantee relies on calibration and test
+samples being exchangeable and does not correct scaffold distribution shift.
+The report and prediction-set CSV are written to
+`data/MoleculeNet/bace/output/conformal/<ModelName>/` by default.
 
 **Interpreting the results.** The test split holds roughly 150 molecules, so a 10-bin reliability diagram has sparsely populated bins that can shift with one or two molecules. The diagram therefore includes a histogram of samples per bin, and `reliability_table.csv` lists per-bin counts, mean probabilities, and observed fractions for both probability sets. Ten bins is a fixed baseline; the bin count should not be tuned to improve the plot. Read Brier score and NLL alongside ECE, and do not treat a small ECE difference as a meaningful improvement. **Uncertainty.** The report and console include 95% paired percentile-bootstrap intervals (1000 resamples by default) over test molecules for each metric and for the calibrated-minus-uncalibrated difference (`delta`, negative means better for Brier, NLL and ECE). `T` is held fixed, and the same resampled molecules score both probability sets. These intervals capture test-sample noise only: they ignore variance in the fitted `T` and the scaffold-level dependence between molecules, so they are optimistic. If a `delta` interval contains 0, there is no evidence of improvement. Brier score is the binary positive-class version (`mean((p - y)^2)`), half the multiclass sum-over-classes convention.
 
@@ -481,7 +530,9 @@ utilities, CLI parsing, train/validation model selection behavior, and
 calibration (temperature fitting, input validation, edge cases such as T = 1,
 overconfident logits, invalid probabilities, single-class labels, empty or
 mismatched inputs, invalid JSON, model-identity mismatches, bootstrap intervals,
-artifact round trips, CLI end to end). `pytest` is not required; the suite uses `unittest`.
+artifact round trips, CLI end to end), and conformal prediction thresholds,
+coverage, groups, CLI outputs, missing-GNN-calibration-file recovery, and
+runner dispatch. `pytest` is not required; the suite uses `unittest`.
 
 Other supported architectures include `GCN` and `GATGraphTransformer`.
 
@@ -526,6 +577,8 @@ The default experiments are:
 | `bace-preprocessing` | Scaffold splitting and fingerprint generation. |
 | `bace-baseline` | Classical fingerprint-based classifiers. |
 | `bace-gnn` | GNN training, metrics, and model artifacts. |
+| `bace-calibration` | Temperature-scaling metrics and artifacts. |
+| `bace-conformal` | Prediction-set coverage, size metrics, and artifacts. |
 
 Tracking settings can be configured using `MLFLOW_TRACKING_URI` or the supported command-line options.
 
@@ -541,7 +594,9 @@ Several limitations should be addressed before treating the current results as a
 
 **Probability reliability.** Softmax probabilities are not necessarily calibrated. Temperature scaling is applied after training, but with a small validation split the fitted temperature is itself noisy, and a high predicted probability should not automatically be interpreted as a reliable estimate of activity. Calibration is assessed on a test split of roughly 150 molecules; bootstrap intervals ignore scaffold dependence and the uncertainty in `T`.
 
-**Limited interpretability and uncertainty estimation.** The pipeline does not yet provide validated molecular explanations or conformal prediction sets. Temperature scaling and bootstrap intervals address probability quality only, not per-molecule uncertainty.
+**Conformal coverage under distribution shift.** Split conformal prediction sets are implemented, but their marginal coverage relies on calibration and test samples being exchangeable. Scaffold-aware splitting deliberately separates scaffold groups, so that assumption may not hold across these partitions; empirical test coverage is descriptive and not a guarantee under arbitrary scaffold shift. Group summaries do not change the fitted threshold.
+
+**Limited interpretability and uncertainty estimation.** The pipeline does not yet provide validated molecular explanations, ensembles, or scaffold-aware uncertainty estimates. Conformal sets provide set-valued predictions but do not establish prospective activity or correct distribution shift.
 
 **Benchmark scope.** Results on one molecular target do not establish generalization to other targets or prospective drug-discovery settings.
 
@@ -549,36 +604,36 @@ Several limitations should be addressed before treating the current results as a
 
 The next development phase will focus on reliable molecular prediction rather than adding model architectures alone.
 
-### 1. Correct the experimental protocol
+~~### 1. Correct the experimental protocol~~
 
-Introduce a fixed, scaffold-aware four-way split:
+~~Introduce a fixed, scaffold-aware four-way split:~~
 
-| Partition | Target proportion | Purpose |
-|---|---:|---|
-| Training | 70% | Fit model parameters. |
-| Validation | 10% | Checkpoint/model selection, early stopping, and fitting the temperature (currently). |
-| Calibration | 10% | Reserved for conformal thresholds (not used by temperature scaling). |
-| Test | 10% | Final, untouched evaluation. |
+~~| Partition | Target proportion | Purpose |~~
+~~|---|---:|---|
+~~| Training | 70% | Fit model parameters. |~~
+~~| Validation | 10% | Checkpoint/model selection, early stopping, and fitting the temperature (currently). |~~
+~~| Calibration | 10% | Reserved for conformal thresholds (not used by temperature scaling). |~~
+~~| Test | 10% | Final, untouched evaluation. |~~
 
-The target counts are approximate; scaffold grouping and class balance may affect the actual partition sizes.
+~~The target counts are approximate; scaffold grouping and class balance may affect the actual partition sizes.~~
 
-The implementation should:
+~~The implementation should:~~
 
-- Keep test-set metrics out of checkpoint selection (done).
-- Use validation data for early stopping and model selection.
-- Keep calibration data separate from model fitting and selection.
-- Evaluate the frozen pipeline on the test set only after the modeling and calibration decisions are finalized.
-- Save partition assignments and audit scaffold overlap, class distributions, and sample counts.
+~~- Keep test-set metrics out of checkpoint selection (done).~~
+~~- Use validation data for early stopping and model selection.~~
+~~- Keep calibration data separate from model fitting and selection.~~
+~~- Evaluate the frozen pipeline on the test set only after the modeling and calibration decisions are finalized.~~
+~~- Save partition assignments and audit scaffold overlap, class distributions, and sample counts.~~
 
-### 2. Probability calibration
+~~### 2. Probability calibration~~
 
-**Status: implemented** (see [Probability calibration](#probability-calibration)). Temperature scaling is fitted on validation logits and evaluated on the test split with Brier score, NLL, ECE, reliability diagrams (with per-bin counts) and paired bootstrap intervals. Still planned: an independent temperature-fitting set (for example cross-fitting) and scaffold-aware uncertainty intervals; the current bootstrap intervals are optimistic (see above).
+~~**Status: implemented** (see [Probability calibration](#probability-calibration)). Temperature scaling is fitted on validation logits and evaluated on the test split with Brier score, NLL, ECE, reliability diagrams (with per-bin counts) and paired bootstrap intervals. Still planned: an independent temperature-fitting set (for example cross-fitting) and scaffold-aware uncertainty intervals; the current bootstrap intervals are optimistic (see above).~~
 
 ### 3. Conformal prediction
 
-Implement split conformal classification to return a prediction set rather than only a single predicted class.
+**Status: implemented.** The pipeline fits split-conformal thresholds on the held-out calibration predictions and evaluates test prediction sets (see [Split conformal prediction](#split-conformal-prediction)). Further work should investigate calibration strategies and coverage under scaffold distribution shift.
 
-Evaluate:
+Current reports include:
 
 - Empirical coverage
 - Average prediction-set size

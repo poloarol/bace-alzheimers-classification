@@ -379,6 +379,11 @@ def prediction_paths(predictions_directory, model_name: str) -> tuple[Path, Path
     return directory / "validation_predictions.csv", directory / "test_predictions.csv"
 
 
+def calibration_prediction_path(predictions_directory, model_name: str) -> Path:
+    """Calibration-split prediction CSV path used by split conformal prediction."""
+    return Path(predictions_directory) / model_name / "calibration_predictions.csv"
+
+
 def calibration_path_for(model_path: str) -> Path:
     return Path(model_path).with_suffix(CALIBRATION_FILE_SUFFIX)
 
@@ -477,7 +482,10 @@ def _read_predictions(csv_path: str):
     if has_logits and "probability" in frame:
         raise ValueError(f"{csv_path}: provide logit_0/logit_1 or probability, not both.")
     if has_logits:
-        values = frame[["logit_0", "logit_1"]].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+        values = frame[["logit_0", "logit_1"]].apply(pd.to_numeric, errors="coerce").to_numpy(
+            dtype=np.float64,
+            copy=True,
+        )
         if not np.isfinite(values).all():
             raise ValueError(f"{csv_path}: logit columns must be numeric and finite.")
         logits = torch.as_tensor(values, dtype=torch.float64)
