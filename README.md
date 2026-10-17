@@ -1,157 +1,300 @@
 # BACE-1 Molecular Activity Classification
 
-A molecular machine learning project comparing classical machine learning and graph neural networks for predicting whether a small molecule inhibits beta-secretase 1 (BACE-1).
+A reproducible molecular machine learning project comparing classical machine learning and graph neural networks (GNNs) for predicting whether small molecules inhibit beta-secretase 1 (BACE-1).
 
-The project combines molecular graph learning, cheminformatics, scaffold-aware evaluation, probability calibration, split conformal prediction, experiment tracking, and reproducible workflow automation. The conformal stage reports prediction sets and empirical coverage; future work will focus on explainability and broader uncertainty analysis.
+The project combines molecular representations, scaffold-aware evaluation, probability calibration, split conformal prediction, experiment tracking, and workflow automation. It investigates not only how accurately models classify molecular activity, but also how reliable their probabilities are and how prediction sets can communicate uncertainty.
 
-- BACE molecule graph processing with DeepChem and PyTorch Geometric.
-- Scaffold-aware, stratified train/validation/calibration/test splitting.
-- Morgan fingerprint generation for classical machine-learning models.
-- Baseline classifiers:
-  - Random Forest
-  - Logistic Regression
-  - Gradient Boosting
-- Graph convolutional neural network (GCN) training.
-- Graph attention network (GAT) training.
-- GAT combined with graph Transformer convolution training.
-- MLflow tracking for preprocessing and model experiments.
-- Test-set inference for scikit-learn and PyTorch models.
-- Temperature scaling and split conformal prediction sets.
-- Confusion-matrix export as both PNG and TXT.
-- A pipeline runner for complete or individual workflow stages.
+**Current result:** On the current held-out scaffold-aware test split, a Morgan fingerprint + Gradient Boosting baseline outperforms the three evaluated graph neural networks. The graph models nevertheless provide a useful comparison for studying molecular representation learning, calibration, and uncertainty.
 
-BACE-1 is an enzyme involved in amyloid-beta production and has been investigated as a therapeutic target in Alzheimer's disease research. This project addresses a molecular activity prediction task: given a molecule's structure, predict whether it inhibits BACE-1.
+> **Scope:** This is a molecular activity classification task, not an Alzheimer's disease diagnostic model. Computational predictions do not establish experimental inhibitory activity, clinical efficacy, or therapeutic safety.
 
-**This is a molecular property classification task, not a model for diagnosing Alzheimer's disease in patients.**
+## Table of Contents
 
-The project uses the BACE dataset from MoleculeNet, containing approximately 1,530 molecular observations.
+- [Project Overview](#project-overview)
+- [Objectives](#objectives)
+- [Dataset](#dataset)
+- [Methods](#methods)
+- [Current Results](#current-results)
+- [Data Audit](#data-audit)
+- [Repository Structure](#repository-structure)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Probability Calibration](#probability-calibration)
+- [Split Conformal Prediction](#split-conformal-prediction)
+- [Audit and Model Comparison](#audit-and-model-comparison)
+- [MLflow Experiment Tracking](#mlflow-experiment-tracking)
+- [Testing](#testing)
+- [Limitations](#limitations)
+- [Next Steps](#next-steps)
+- [Project Direction](#project-direction)
+- [Disclaimer](#disclaimer)
+
+## Project Overview
+
+BACE-1, also known as beta-secretase 1, is an enzyme involved in amyloid-beta production and has been investigated as a therapeutic target in Alzheimer's disease research.
+
+This project uses molecular structures to predict a binary activity label:
+
+- **Class 0:** Non-inhibitor.
+- **Class 1:** BACE-1 inhibitor.
+
+The workflow compares conventional molecular fingerprints with learned graph representations. It then evaluates classification performance, probability calibration, and conformal prediction sets on held-out molecules.
+
+### Key features
+
+- Molecule processing using RDKit, DeepChem, and PyTorch Geometric.
+- Morgan fingerprint generation for classical machine learning.
+- Scaffold-aware train, validation, calibration, and test partitions.
+- Classical baseline classifiers: Logistic Regression, Random Forest, and Gradient Boosting.
+- Graph Convolutional Network (GCN).
+- Graph Attention Network (GAT).
+- Hybrid GAT + Graph Transformer architecture.
+- MLflow experiment tracking and artifact logging.
+- Temperature scaling for probability calibration.
+- Split conformal prediction with a nominal 90% coverage target.
+- Classification, calibration, and prediction-set reports.
+- Snakemake workflow orchestration.
+- Dataset and partition-integrity auditing.
 
 ## Objectives
 
-- Compare classical machine learning models with graph neural networks for molecular activity classification.
-- Represent molecules using Morgan fingerprints and graph-based representations.
-- Evaluate generalization using scaffold-aware data splitting.
-- Track experiments, metrics, and model artifacts with MLflow.
-- Automate the modeling workflow using Snakemake.
-- Establish a foundation for explainable and uncertainty-aware molecular predictions.
+1. Compare classical machine learning and graph neural networks for molecular activity classification.
+2. Evaluate Morgan fingerprints against atom-and-bond graph representations.
+3. Investigate generalization using scaffold-aware data partitioning.
+4. Assess probability quality using Brier score, negative log-likelihood, and expected calibration error.
+5. Explore set-valued predictions through split conformal prediction.
+6. Maintain reproducible experiments through MLflow and Snakemake.
+7. Establish a foundation for molecular explainability and uncertainty-aware prediction.
+
+## Dataset
+
+The project uses the BACE dataset distributed through [MoleculeNet](https://moleculenet.org/), containing **1,513 molecular observations** in the audited dataset.
+
+| Property | Value |
+|---|---:|
+| Total molecules | 1,513 |
+| Non-inhibitors (class 0) | 822 |
+| Inhibitors (class 1) | 691 |
+| Class 0 proportion | 54.3% |
+| Class 1 proportion | 45.7% |
+| Exact duplicate SMILES in audit | 0 |
+
+Molecules are represented by SMILES strings and processed into molecular fingerprints or graph structures.
+
+### Label interpretation
+
+The target is the source-provided binary MoleculeNet activity label. It should not be treated as equivalent to applying a strict pIC50 threshold of 7 to every molecule.
+
+The audit identified 17 class-1 molecules with pIC50 below 7. No class-0 molecules had pIC50 at or above 7. The current experiments retain the source-provided labels rather than silently redefining the task.
+
+### Data partitioning
+
+The workflow uses four partitions with approximate target proportions of 70% training, 10% validation, 10% calibration, and 10% testing.
+
+| Partition | Molecules | Primary purpose |
+|---|---:|---|
+| Training | 1,060 | Fit model parameters |
+| Validation | 151 | Model selection, early stopping, temperature fitting |
+| Calibration | 151 | Fit conformal prediction threshold |
+| Test | 151 | Final evaluation |
+
+The current split contains 1,513 molecules in total. Scaffold grouping can affect exact partition sizes and class balance.
+
+The intended evaluation is scaffold-aware: the split-generation workflow is designed to keep molecular scaffold groups separated. The audit reported below verifies molecule-level partition integrity; pairwise scaffold-overlap and standardized-structure-overlap reports should also be retained when validating the exact split used for a benchmark.
 
 ## Methods
 
-### 1. Molecular representation
+### 1. Molecular representations
 
-Molecules are processed using RDKit, DeepChem, and PyTorch Geometric.
+**Morgan fingerprints**
 
-Two representations are used:
+Morgan fingerprints encode local molecular environments as fixed-length binary vectors. The current baseline uses radius 2 and 2,048 bits.
 
-- **Morgan fingerprints:** Fixed-length molecular descriptors for classical machine learning.
-- **Molecular graphs:** Atoms represented as nodes and chemical bonds represented as edges, with atom and bond features used by graph neural networks.
+**Molecular graphs**
 
-### 2. Classical machine learning baselines
+Graph representations encode atoms as nodes and chemical bonds as edges. Atom and bond features are used by graph neural networks to learn molecular representations through neighborhood aggregation and attention.
 
-Three classifiers are implemented using Morgan fingerprints:
+### 2. Classical machine learning
+
+The project implements three classifiers using Morgan fingerprints:
 
 - Logistic Regression
 - Random Forest
 - Gradient Boosting
 
-These models provide reference points for assessing whether graph-based representations offer an advantage over conventional molecular fingerprints.
+The baseline models provide reference points for evaluating whether learned graph representations improve activity prediction.
+
+The current headline baseline is `GradientBoostingClassifier`.
 
 ### 3. Graph neural networks
 
-The graph learning pipeline currently supports three architectures:
-
 | Architecture | Description |
 |---|---|
-| GCN | Graph convolutional network for learning molecular representations through neighborhood aggregation. |
-| GAT | Graph attention network that learns attention-weighted neighborhood representations. |
-| GATGraphTransformer | Hybrid architecture combining graph attention with Transformer-style graph convolution. |
+| GCN | Graph Convolutional Network that aggregates information from neighboring atoms. |
+| GAT | Graph Attention Network that learns attention-weighted neighborhood representations. |
+| GAT + Graph Transformer | Hybrid graph architecture combining graph attention with Transformer-style graph convolution. |
 
-The graph models learn molecular representations from atom and bond features and produce binary activity predictions.
+The graph models produce binary activity predictions from molecular graph features.
 
 ### 4. Evaluation metrics
 
-The pipeline reports:
+**Classification**
 
-- ROC-AUC
-- Precision–Recall AUC (PR-AUC)
+- PR-AUC (area under the precision–recall curve)
+- ROC-AUC (area under the receiver operating characteristic curve)
+- Accuracy
 - Balanced accuracy
-- F1-score for the inhibitor class
+- Inhibitor-class F1-score
 - Confusion matrices
 
-ROC-AUC and PR-AUC measure ranking performance, while balanced accuracy and inhibitor-class F1 provide complementary views of classification performance.
+PR-AUC is particularly useful when assessing positive-class retrieval. ROC-AUC evaluates ranking across classification thresholds, while balanced accuracy and inhibitor F1 provide complementary views of classification behavior.
 
-### 5. Reproducibility and experiment tracking
+**Probability calibration**
 
-The project uses:
+- Brier score
+- Negative log-likelihood (NLL)
+- Expected calibration error (ECE)
+- Reliability diagrams
+- Paired bootstrap intervals for calibration changes
 
-- **MLflow** to track experiments, metrics, and model artifacts.
-- **Snakemake** to orchestrate preprocessing and model training.
-- A configurable command-line runner (`app.py`) to execute individual stages or the complete workflow.
+**Conformal prediction**
 
-## Current results
+- Overall empirical coverage
+- Class-specific coverage
+- Average prediction-set size
+- Singleton prediction rate
+- Ambiguous prediction rate
+- Empty-set rate
 
-The numbers below come from **one clean run under the revised protocol**
-(`python app.py compare --retrain`). All models share the same scaffold split,
-and each model is selected on **validation PR-AUC**. Temperature scaling is
-fitted on validation, conformal sets are fitted on the dedicated calibration
-split, and every metric below is reported on the untouched test split (151
-molecules: 82 non-inhibitors, 69 inhibitors).
+### 5. Model selection and data roles
 
-| Model | Val PR-AUC | Test PR-AUC | Test ROC-AUC | Balanced acc. | Inhibitor F1 |
-|---|---:|---:|---:|---:|---:|
-| Morgan baseline (GradientBoostingClassifier) | 0.883 | **0.791** | **0.794** | **0.706** | **0.656** |
-| GCN | 0.793 | 0.579 | 0.655 | 0.621 | 0.530 |
-| GAT | 0.767 | 0.640 | 0.674 | 0.610 | 0.529 |
-| GATGraphTransformer (hybrid) | 0.826 | 0.591 | 0.691 | 0.627 | 0.567 |
+Models are selected using validation PR-AUC. The calibration split is reserved for fitting the conformal threshold, and the test split is used for final evaluation.
 
-Calibration (temperature scaling) and conformal prediction at a 0.90 target:
+The current temperature-scaling protocol fits the temperature on validation predictions. Because validation is also used for model selection and checkpoint selection, temperature fitting is not fully independent of those decisions.
 
-| Model | `T` | ECE before | ECE after | NLL before | NLL after | Coverage | Class-1 coverage | Avg. set size |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Morgan baseline | 0.84 | 0.081 | 0.120 | 0.557 | 0.570 | 0.901 | 0.812 | 1.48 |
-| GCN | 1.53 | 0.155 | 0.103 | 0.842 | 0.726 | 0.894 | 0.841 | 1.68 |
-| GAT | 2.31 | 0.153 | 0.074 | 0.873 | 0.680 | 0.887 | 0.783 | 1.60 |
-| GATGraphTransformer | 1.65 | 0.168 | 0.125 | 0.874 | 0.720 | 0.894 | 0.870 | 1.67 |
+## Current Results
 
-How to read this:
+The tables below report the latest comparison available for the current experimental configuration. All four models are evaluated on the same held-out test partition of 151 molecules: 82 non-inhibitors and 69 inhibitors.
 
-- Under the revised protocol the Morgan baseline outperforms all three graph
-  models on the test split. These results replace the earlier, more optimistic
-  GNN numbers (see [Historical results](#historical-results-superseded)).
-- Every model scores much lower on test than on validation, which is
-  consistent with the scaffold-aware split but is not a cause that was tested
-  here.
-- GNNs ran for the default 100 epochs with one seed and no hyperparameter
-  search, and validation PR-AUC was still improving near the end for some
-  models. They may be under-trained, so the gap is a statement about this
-  configuration, not about the architectures in general.
-- With 151 test molecules and a single seed, differences of a few hundredths
-  are within noise; no confidence intervals are reported for the table above.
-- Temperature scaling improved ECE and NLL for the GNNs, but not for the
-  baseline (`T` < 1, ECE and NLL slightly worse), so it should not be assumed
-  to help every model.
-- Conformal coverage is close to but slightly below 0.90 for the GNNs and is
-  lower for inhibitors than non-inhibitors for every model, consistent with
-  scaffold shift between the calibration and test splits. Coverage is
-  descriptive, not guaranteed.
+These results represent **one split and one seed**, not a repeated-split benchmark.
 
-The configuration, metrics, split counts, and the split archive are retained in
-the MLflow experiment `bace-comparison`; the table is also written to
-`data/MoleculeNet/bace/output/comparison/comparison.csv`.
+### 1. Classification performance
 
-### Data audit
+| Model | Validation PR-AUC | Test PR-AUC | Test ROC-AUC | Accuracy | Balanced accuracy | Inhibitor F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| Morgan + Gradient Boosting | 0.883 | **0.791** | **0.794** | **0.715** | **0.706** | **0.656** |
+| GCN | 0.831 | 0.699 | 0.729 | 0.689 | 0.684 | 0.647 |
+| GAT | 0.767 | 0.640 | 0.674 | 0.623 | 0.610 | 0.529 |
+| GAT + Graph Transformer | 0.826 | 0.591 | 0.691 | 0.636 | 0.627 | 0.567 |
 
-`python app.py audit` (or `python src/audit_splits.py`) writes
-`data/MoleculeNet/bace/output/split_audit.json`:
+**Key finding:** The Morgan fingerprint baseline achieves the strongest test PR-AUC, ROC-AUC, accuracy, balanced accuracy, and inhibitor F1 in this comparison. GCN is the strongest graph model by test PR-AUC, balanced accuracy, and inhibitor F1.
 
-- **Class semantics.** `Class` 1 is a BACE-1 inhibitor and 0 is a non-inhibitor.
-  This is the source MoleculeNet label, not a strict pIC50 cutoff: every
-  class-0 molecule has pIC50 < 7, and 674 of 691 class-1 molecules have
-  pIC50 ≥ 7 (17 class-1 molecules lie below 7).
-- **Partitions.** 1,513 molecules in total (822 class 0, 691 class 1); the four
-  partitions are disjoint and cover every molecule.
-- **Graphs.** The number of processed graphs equals the number of molecules in
-  every partition; no SMILES was skipped.
+The results show that graph learning did not outperform the classical baseline under the current experimental configuration. They do not establish that GNNs are inherently inferior for molecular activity prediction.
+
+The validation-to-test performance gap is substantial for several models. Scaffold-aware evaluation is intended to probe generalization to unseen molecular scaffolds, but the current experiment does not isolate the cause of that gap.
+
+The graph models have not undergone comprehensive hyperparameter optimization or repeated-seed evaluation. Training convergence and data-loader shuffling should be verified before interpreting the results as a stable architectural comparison.
+
+### 2. Probability calibration
+
+Temperature scaling applies a positive scalar temperature \(T\) to model logits:
+```
+\[
+p_k = \frac{\exp(z_k/T)}
+{\sum_j \exp(z_j/T)}
+\]
+```
+The temperature is fitted by minimizing validation negative log-likelihood. A temperature above 1 softens the probability distribution; a temperature below 1 sharpens it.
+
+The following metrics are measured on the test set before and after calibration. Lower values are better.
+
+| Model | Temperature | Brier before | Brier after | NLL before | NLL after | ECE before | ECE after |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Morgan + Gradient Boosting | 0.841 | 0.187 | 0.190 | 0.557 | 0.570 | 0.081 | 0.120 |
+| GCN | 6.105 | 0.252 | 0.215 | 1.766 | 0.667 | 0.237 | 0.105 |
+| GAT | 2.314 | 0.249 | 0.232 | 0.873 | 0.680 | 0.153 | **0.074** |
+| GAT + Graph Transformer | 1.654 | 0.250 | 0.237 | 0.874 | 0.720 | 0.168 | 0.125 |
+
+Temperature scaling improves the reported Brier score, NLL, and ECE point estimates for the three graph models, although the magnitude differs by architecture. GAT achieves the lowest post-calibration ECE, while GCN shows the largest reduction in NLL.
+
+The Morgan baseline's point estimates become slightly worse after temperature scaling. Paired bootstrap intervals for the baseline changes include zero, so this is not strong evidence of a meaningful deterioration.
+
+ECE depends on binning and can be unstable with small test samples. Bootstrap intervals quantify test-sample variability conditional on the fitted temperature; they do not account for uncertainty in temperature estimation or dependence between chemically related molecules.
+
+### 3. Split conformal prediction
+
+Split conformal prediction returns a set of plausible labels rather than only one predicted class. The current nominal marginal coverage target is 90%.
+
+| Model | Overall coverage | Class 0 coverage | Class 1 coverage | Average set size | Singleton rate | Ambiguous rate |
+|---|---:|---:|---:|---:|---:|---:|
+| Morgan + Gradient Boosting | **90.1%** | 97.6% | 81.2% | **1.48** | **51.7%** | 48.3% |
+| GCN | 88.7% | 91.5% | 85.5% | 1.54 | 46.4% | 53.6% |
+| GAT | 88.7% | 97.6% | 78.3% | 1.60 | 40.4% | 59.6% |
+| GAT + Graph Transformer | 89.4% | 91.5% | **87.0%** | 1.67 | 33.1% | 66.9% |
+
+Class 0 represents non-inhibitors; class 1 represents inhibitors.
+
+A prediction set can take three forms:
+
+- `{0}` — non-inhibitor only.
+- `{1}` — inhibitor only.
+- `{0, 1}` — both classes remain plausible.
+
+The Morgan baseline produces the smallest average sets and the highest singleton rate, with 90.1% overall empirical coverage. However, its inhibitor-class coverage is 81.2%.
+
+The GAT + Graph Transformer model has the highest observed inhibitor coverage at 87.0% and more balanced coverage across the two classes, but it also produces the largest average sets and the lowest singleton rate.
+
+These results illustrate a trade-off between coverage and decisiveness. Smaller sets are not automatically preferable if they exclude the true label more frequently. Larger sets are not, by themselves, proof of intrinsically greater model uncertainty.
+
+**Coverage caveat:** A nominal 90% marginal target does not guarantee 90% coverage within each class or under arbitrary distribution shift. Standard split-conformal coverage relies on exchangeability between calibration and test observations. Generalization to unseen chemical scaffolds can challenge that assumption, so the coverage reported here is empirical rather than a guarantee under scaffold shift.
+
+### 4. Overall interpretation
+
+The current experiment provides three complementary findings:
+
+1. **Classification:** Morgan fingerprints + Gradient Boosting outperform the tested graph architectures on the current test split.
+2. **Calibration:** Temperature scaling improves several probability-quality metrics for the graph models, but does not improve every metric for every model.
+3. **Uncertainty:** Conformal prediction reveals class-wise coverage differences and varying levels of prediction-set ambiguity that are not captured by ROC-AUC or accuracy alone.
+
+The next priority is to verify the training implementation and establish whether these findings persist across repeated scaffold splits and seeds.
+
+## Data Audit
+
+The audit command checks source labels, SMILES validity, graph counts, and partition assignments.
+
+Run:
+
+```bash
+python app.py audit
+```
+
+Alternatively:
+
+```bash
+python src/audit_splits.py
+```
+
+The report is written to:
+
+```text
+data/MoleculeNet/bace/output/split_audit.json
+```
+
+### Dataset integrity
+
+| Audit check | Result |
+|---|---:|
+| Total molecules | 1,513 |
+| Class 0 molecules | 822 |
+| Class 1 molecules | 691 |
+| Exact duplicate SMILES | 0 |
+| Invalid SMILES | 0 |
+| Processed graph counts match molecule counts | Yes, in all partitions |
+| Partitions disjoint | Yes |
+| All molecules assigned | Yes |
+| Processed labels match source labels | Yes |
+
+### Partition counts
 
 | Partition | Molecules | Class 0 | Class 1 | Processed graphs |
 |---|---:|---:|---:|---:|
@@ -159,8 +302,23 @@ the MLflow experiment `bace-comparison`; the table is also written to
 | Validation | 151 | 82 | 69 | 151 |
 | Calibration | 151 | 82 | 69 | 151 |
 | Test | 151 | 82 | 69 | 151 |
+| **Total** | **1,513** | **822** | **691** | **1,513** |
 
-## Repository structure
+### Label discrepancy
+
+The audit found 17 class-1 molecules with pIC50 below 7, representing approximately 1.1% of the dataset. No class-0 molecules had pIC50 at or above 7.
+
+The source-provided activity labels are retained for the current task. The audit establishes the discrepancy but does not establish its cause.
+
+### What the audit does not prove
+
+Zero duplicate SMILES and disjoint partition indices do not automatically establish that no chemically equivalent structures occur across partitions, since the same structure can have different SMILES representations.
+
+Likewise, molecule-level partition integrity does not by itself prove scaffold separation. The split-generation workflow is designed to keep scaffold groups separated, but a persisted pairwise scaffold-overlap report and a canonicalized-structure overlap check should be reviewed before describing the benchmark as fully validated for unseen-scaffold generalization.
+
+## Repository Structure
+
+The principal files and directories are organized as follows:
 
 ```text
 bace-alzheimers-classification/
@@ -170,7 +328,7 @@ bace-alzheimers-classification/
 ├── Snakefile
 ├── README.md
 ├── notebooks/
-├── model/                       # checkpoints and <Model>.calibration.json
+├── model/
 ├── tests/
 └── src/
     ├── dataset.py
@@ -187,118 +345,115 @@ bace-alzheimers-classification/
     └── mlflow_utils.py
 ```
 
-### Main components
-
 | Component | Purpose |
 |---|---|
-| `dataset.py` | Molecular graph dataset processing. |
-| `model.py` | GCN, GAT, and hybrid graph Transformer architectures. |
-| `train.py` | GNN training and evaluation. |
-| `baseline_model.py` | Classical fingerprint-based classifiers. |
-| `build_fingerprints.py` | Morgan fingerprint generation. |
-| `stratified_scaffold_split.py` | Scaffold-aware dataset splitting. |
-| `inference.py` | Model inference, confusion matrices, and optional calibrated probabilities. |
-| `calibration.py` | Temperature fitting, Brier/NLL/ECE metrics, reliability diagrams, and the calibration JSON/report CLI. |
-| `conformal.py` | Split conformal prediction sets and coverage evaluation on held-out calibration and test predictions. |
-| `mlflow_utils.py` | Shared MLflow configuration. |
-| `app.py` | Command-line pipeline runner. |
-| `Snakefile` | Workflow automation. |
+| `app.py` | Command-line pipeline runner |
+| `config.yaml` | Workflow and model configuration |
+| `Snakefile` | Snakemake workflow orchestration |
+| `dataset.py` | Molecular graph dataset processing |
+| `model.py` | GCN, GAT, and hybrid graph Transformer architectures |
+| `train.py` | GNN training and evaluation |
+| `baseline_model.py` | Classical fingerprint-based classifiers |
+| `build_fingerprints.py` | Morgan fingerprint generation |
+| `stratified_scaffold_split.py` | Scaffold-aware partition generation |
+| `inference.py` | Model inference and confusion-matrix export |
+| `calibration.py` | Temperature fitting and probability-quality metrics |
+| `conformal.py` | Split conformal prediction and coverage evaluation |
+| `audit_splits.py` | Dataset and partition audit |
+| `compare_models.py` | Cross-model result comparison |
+| `mlflow_utils.py` | Shared MLflow configuration |
 
-Generated datasets, processed graphs, model checkpoints, and local MLflow database files are runtime artifacts and should not be committed to version control.
+Generated datasets, processed graphs, checkpoints, prediction files, and local MLflow database files are runtime artifacts. They generally should not be committed to version control.
 
 ## Installation
 
-Clone the repository and install the dependencies:
+### Prerequisites
+
+The project uses Python and scientific machine learning libraries, including:
+
+- PyTorch
+- PyTorch Geometric
+- DeepChem
+- RDKit
+- scikit-learn
+- MLflow
+- Snakemake
+- pandas and NumPy
+
+Compatible versions of PyTorch, PyTorch Geometric, and the remaining dependencies are required. Refer to the installed `requirements.txt` and the official PyTorch Geometric installation instructions for platform-specific dependency requirements.
+
+### Clone the repository
 
 ```bash
 git clone https://github.com/poloarol/bace-alzheimers-classification.git
 cd bace-alzheimers-classification
+```
 
+### Install dependencies
+
+```bash
+python -m venv .venv
+```
+
+Activate the environment.
+
+Windows PowerShell:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+Linux or macOS:
+
+```bash
+source .venv/bin/activate
+```
+
+Install the dependencies:
+
+```bash
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-The project uses Python, PyTorch, PyTorch Geometric, DeepChem, RDKit, scikit-learn, MLflow, and Snakemake. Compatible versions of the scientific and graph-learning dependencies are required.
+If installation fails for PyTorch or PyTorch Geometric, install compatible versions for your operating system and hardware according to their official installation instructions.
 
 ## Usage
 
-The following commands correspond to the current pipeline runner.
+The root-level `app.py` runner provides commands for individual workflow stages. By default, the dataset root is `data/MoleculeNet/bace`; use `--dataset-root` to specify another location when supported by the command.
 
 ### 1. Generate the scaffold-aware split
 
-Then open the displayed local MLflow URL in a browser. To use a shared
-tracking server, set `MLFLOW_TRACKING_URI` or pass
-`--mlflow-tracking-uri` to the relevant command.
-
-The default experiments are:
-
-| Experiment | Contents |
-|---|---|
-| `bace-preprocessing` | Scaffold splits and Morgan fingerprints |
-| `bace-baseline` | Random Forest, Logistic Regression, and Gradient Boosting |
-| `bace-gnn` | GCN, GAT, and GATGraphTransformer training, metrics, and logged models |
-| `bace-calibration` | Temperature-scaling metrics and artifacts |
-| `bace-conformal` | Prediction-set coverage, size metrics, and artifacts |
-
-## Results
-
-See [Current results](#current-results) for the revised-protocol comparison.
-
-### Historical results (superseded)
-
-The table below is a historical result from an earlier training implementation
-in which test accuracy influenced checkpoint selection. It is optimistic, was
-obtained under a different protocol, and is not reproduced by the current code;
-do not compare it with the current results.
-
-| Metric | Score |
-|---|---:|
-| ROC-AUC | 0.885628851032983 |
-| PR-AUC | 0.8915840796588492 |
-| Balanced accuracy | 0.8178144255164914 |
-| Inhibitor F1 | 0.8242074927953891 |
-
-### Checkpoint selection in the current code
-
-The GNN code keeps the checkpoint with the highest **validation PR-AUC**,
-evaluated every 5 epochs, with early stopping after 20 evaluations without
-improvement (patience counts evaluations, not epochs). The baselines select the
-estimator by validation PR-AUC as well, so every model family uses the same
-criterion. Training logs train and validation metrics by epoch and
-`best_validation_pr_auc`; it does not score the calibration or test splits.
-Each PyTorch model is saved under
-its model-specific artifact path (`GCN-Model`, `GAT-Model`, or
-`GATGraphTransformer-Model`). Local state-dict checkpoints default to
-`model\GCN.pth`, `model\GAT.pth`, and `model\GATGraphTransformer.pth`.
-
-Baseline evaluation logs ROC-AUC, PR-AUC, balanced accuracy, and inhibitor F1
-for each estimator. Baseline confusion matrices are written under
-`data/MoleculeNet/bace/output/<model-type>/`.
-
-## Run individual pipeline steps
-
-The root-level runner uses `data/MoleculeNet/bace` by default. Override it
-with `--dataset-root` when using another dataset location.
-
-### 1. Create the scaffold split
-
-```powershell
+```bash
 python app.py split
 ```
 
-The existing workflow writes the split artifact to:
+The default split archive is:
 
 ```text
 data/MoleculeNet/bace/clean/train_test_split.npz
 ```
 
-The archive contains `train_idx`, `validation_idx`, `calibration_idx`, and
-`test_idx`. The default proportions are 70% train, 10% validation, 10%
-calibration, and 10% test. Override them with `--train-size`,
-`--validation-size`, `--calibration-size`, and `--test-size`; proportions must
-sum to 1. Use `--n-trials` to change the scaffold-assignment search budget.
-The split command verifies class representation, complete index coverage,
-scaffold separation, and the expected four-array archive contract before
-logging the split artifact.
+It contains the arrays:
+
+- `train_idx`
+- `validation_idx`
+- `calibration_idx`
+- `test_idx`
+
+The default target proportions are 70% training and 10% for each of validation, calibration, and test.
+
+Example with explicit proportions:
+
+```bash
+python app.py split \
+  --train-size 0.7 \
+  --validation-size 0.1 \
+  --calibration-size 0.1 \
+  --test-size 0.1
+```
+
+The split-generation command supports additional options, including `--n-trials`, for the scaffold-assignment search budget. See the command help for available arguments.
 
 ### 2. Generate Morgan fingerprints
 
@@ -306,53 +461,97 @@ logging the split artifact.
 python app.py fingerprints
 ```
 
-This creates train, validation, calibration, and test fingerprint and label
-CSV files under:
+Fingerprint and label CSV files are written under:
 
 ```text
 data/MoleculeNet/bace/fingerprints/
 ```
 
-The directory contains `<split>_fingerprints.csv` and `<split>_labels.csv` for
-each of `train`, `validation`, `calibration`, and `test`.
+The directory contains split-specific files for training, validation, calibration, and test data.
 
-Use `--radius` and `--n-bits` to change the fingerprint configuration.
+The fingerprint configuration can be changed with `--radius` and `--n-bits` where supported. The current baseline uses radius 2 and 2,048 bits.
+
+### 3. Train the classical baselines
 
 ```bash
 python app.py baseline
 ```
 
-This trains the Logistic Regression, Random Forest, and Gradient Boosting baselines and scores them on the validation split. The best model by validation PR-AUC is selected; only that model's held-out predictions are then temperature-calibrated and used for conformal evaluation.
+This trains the supported fingerprint-based classifiers, including Logistic Regression, Random Forest, and Gradient Boosting.
 
-### 4. Train a graph neural network
+The selected baseline is chosen using validation PR-AUC. Its prediction artifacts are then used by the downstream calibration and conformal stages.
 
-Train the GCN:
+### 4. Train graph neural networks
+
+Train a GCN:
 
 ```bash
 python app.py gnn --model GCN --epochs 100
 ```
 
-Train the GAT:
+Train a GAT:
 
 ```bash
 python app.py gnn --model GAT --epochs 100
 ```
 
-Train the hybrid architecture:
+Train the hybrid GAT + Graph Transformer:
 
 ```bash
-python app.py gnn --model GATGraphTransformer \
+python app.py gnn \
+  --model GATGraphTransformer \
   --epochs 100 \
   --batch-size 32
 ```
 
-The runner also supports model configuration options such as hidden channels and learning rate.
+Train all supported graph architectures:
 
-### 5. Run inference
+```bash
+python app.py gnn --all-models --epochs 100
+```
 
-Inference uses a model URI from an MLflow run.
+Available model options include hidden-channel and learning-rate settings. Consult `python app.py gnn --help` for the options supported by the current checkout.
 
-For a classical model:
+Validation PR-AUC controls checkpoint selection and early stopping. Calibration and test data should not be used to select model parameters.
+
+### 5. Run the complete pipeline
+
+Run the default pipeline:
+
+```bash
+python app.py all
+```
+
+Run all supported GNN architectures and finish with the audit and cross-model comparison:
+
+```bash
+python app.py all --all-models
+```
+
+An example configuration is:
+
+```bash
+python app.py all \
+  --train-size 0.7 \
+  --validation-size 0.1 \
+  --calibration-size 0.1 \
+  --test-size 0.1 \
+  --n-trials 100 \
+  --radius 2 \
+  --n-bits 2048 \
+  --epochs 100 \
+  --hidden-channels 64 \
+  --learning-rate 0.01 \
+  --batch-size 32
+```
+
+Verify command-line options with `python app.py all --help` if the current version exposes different options.
+
+### 6. Run inference
+
+Inference can load a model logged in MLflow using its model URI.
+
+Example for a classical model:
 
 ```bash
 python app.py inference \
@@ -361,7 +560,7 @@ python app.py inference \
   --model-type RandomForestClassifier
 ```
 
-For a graph model:
+Example for a graph model:
 
 ```bash
 python app.py inference \
@@ -370,424 +569,281 @@ python app.py inference \
   --model-type GAT
 ```
 
-Inference outputs include confusion matrices in PNG and TXT formats under:
+Replace `<run-id>` with the identifier of the relevant MLflow run.
+
+Confusion matrices are written under the model-specific output directory, typically within:
 
 ```text
 data/MoleculeNet/bace/output/
 ```
 
-Replace `<run-id>` with the identifier of the relevant MLflow run.
+### 7. Run Snakemake
 
-### 6. Run the complete workflow
-
-To train all supported GNN architectures with one command:
-
-```powershell
-python app.py gnn --all-models --epochs 100
-```
-
-The existing `gnn --model <name>` form remains supported for legacy usage.
-Each GNN run loads the named `train`, `validation`, `calibration`, and `test`
-graph splits from the split archive. Missing processed graph files are created
-automatically under `data/MoleculeNet/bace/processed/`. The validation split
-controls checkpoint selection and early stopping. The GNN command logs
-epoch-level train and validation metrics and does not score the calibration or
-test splits; it only writes their raw logits, and final test results come from
-the calibration and conformal stages. Processed graph
-cache names include a hash of the split archive, so changing the split causes
-the affected datasets to be rebuilt automatically.
-Use `--hidden-channels` and `--learning-rate` to change model settings.
-
-### Probability calibration
-
-Calibration uses temperature scaling: a single positive temperature `T` is fitted on the **validation** logits and labels by minimising NLL of `softmax(logits / T)` with LBFGS on `log T` (so `T > 0`; the fit must land in [0.01, 100] and not worsen validation NLL). Probabilities become `softmax(logits / T)`. Argmax predictions, ROC-AUC, and PR-AUC are unchanged; only probability quality can improve. The test set is never used to fit `T`, and the calibration split is not used by this stage.
-
-Data roles in the current code:
-
-| Split | Used for |
-|---|---|
-| Train | Fitting model parameters. |
-| Validation | GNN checkpoint selection and early stopping and baseline selection (all by validation PR-AUC), and fitting `T`. |
-| Calibration | Used to fit the split-conformal nonconformity threshold; not used for temperature fitting or model selection. Baseline final metrics may also be reported on it. |
-| Test | Final evaluation only: calibration metrics, bootstrap intervals, and conformal coverage/set-size metrics. |
-
-Calibration is a separate downstream stage: training writes only the labelled raw logits, and `src/calibration.py` is the single place that fits `T`, evaluates it on test, and writes the calibration artifact. This lets you recalibrate without retraining.
-
-- `python app.py gnn ...` trains, writes validation/calibration/test prediction CSVs, then runs temperature calibration and conformal evaluation for that model.
-- `python app.py baseline` selects the baseline by validation PR-AUC, writes its validation/calibration/test prediction CSVs (log of `predict_proba` as logits), then runs temperature calibration and conformal evaluation for the selected model.
-- Snakemake runs `calibrate_gnn` and `conformal_gnn` after each `train_gnn`, plus `calibrate_baseline`/`conformal_baseline` for the selected baseline, then `audit` and `compare`.
-
-Each temperature calibration compares uncalibrated and scaled probabilities on the same test samples using Brier score, negative log-likelihood (NLL), and expected calibration error (ECE). Do not select models, temperatures, or thresholds from test metrics. Validation also drives checkpoint selection, so the temperature fit is not fully independent of it. The conformal stage uses the separate calibration split to fit a finite-sample threshold and evaluates prediction-set coverage and size on test. Temperature scaling changes the probability inputs to conformal prediction but does not use calibration or test labels to fit its temperature.
-
-Outputs:
-
-```text
-data/MoleculeNet/bace/output/predictions/<ModelName>/validation_predictions.csv   # label, logit_0, logit_1
-data/MoleculeNet/bace/output/predictions/<ModelName>/calibration_predictions.csv
-data/MoleculeNet/bace/output/predictions/<ModelName>/test_predictions.csv
-data/MoleculeNet/bace/output/predictions/selected_baseline.json                   # baseline only
-model/<ModelName>.calibration.json                                                # canonical artifact: T, model, checkpoint, class convention, counts, before/after metrics
-data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_diagram.png
-data/MoleculeNet/bace/output/calibration/<ModelName>/reliability_table.csv
-data/MoleculeNet/bace/output/calibration/<ModelName>/calibration_report.json     # machine-readable before/after metrics, counts, binning, bootstrap intervals
-data/MoleculeNet/bace/output/conformal/<ModelName>/conformal_predictions.csv     # test labels, probabilities, predicted labels, prediction sets, set sizes
-data/MoleculeNet/bace/output/conformal/<ModelName>/conformal_report.json         # coverage, set size, class/group summaries
-```
-
-Calibration runs also log to the MLflow experiment `bace-calibration` (run tagged with `model`; metrics `temperature` and `test_{uncalibrated,calibrated}_{brier,nll,ece}`; artifacts under `calibration/`). Conformal runs log coverage, threshold, and prediction-set metrics to `bace-conformal`, with report and per-sample predictions under `conformal/`. Training runs no longer carry downstream calibration/conformal metrics. Snakemake declares the calibration JSON, diagram, table and report as outputs of `calibrate_gnn` and the conformal report as an output of `conformal_gnn`; you can also run conformal evaluation separately with the command below.
-
-The JSON has a `schema_version`, records `positive_class` (class 1 = BACE-1 inhibitor), and loading it with `expected_model` refuses a temperature fitted for a different model. MLflow no longer receives calibration metrics from training; the calibration stage logs them itself (below).
-
-To recalibrate (for example with a different bin count) without retraining:
-
-```bash
-python app.py calibrate --model-type GCN            # or GAT, GATGraphTransformer
-python app.py calibrate --model-type best-baseline  # the baseline selected by validation PR-AUC
-```
-
-This prints sample and class counts, `T`, the before/after Brier, NLL, and ECE, and bootstrap intervals for the calibrated-minus-uncalibrated differences. `--bins` must be a positive integer (default 10); `--bootstrap N` sets the number of resamples (default 1000, `0` disables); the CLI also accepts `--seed`. Use `--output-dir` and `--temperature-output` to change locations.
-
-To calibrate arbitrary predictions instead, pass CSVs with a `label` column (0/1) plus either `logit_0`/`logit_1` or `probability`, the probability of class 1 (not an arbitrary confidence score). Inputs are checked for finite values and binary labels. The fit input must come from the validation split and the evaluation input from the test split: a file named after another split (for example `test_predictions.csv` passed as `--fit-predictions`) is rejected, and the two files must differ. The calibration JSON and report record `fit_split`, `fit_predictions_file`, `fit_counts`, `eval_split`, `eval_predictions_file` and `eval_counts`:
-
-```bash
-python src/calibration.py \
-  --fit-predictions validation_predictions.csv \
-  --eval-predictions test_predictions.csv \
-  --model-name GCN
-```
-
-`--validation` and `--test` remain accepted as aliases for these two options.
-
-```bash
-python app.py calibrate \
-  --validation-predictions validation_predictions.csv \
-  --test-predictions test_predictions.csv
-```
-
-**Calibrated inference.** `app.py inference` automatically passes `model/<model-type>.calibration.json` to `src/inference.py` when it exists (or pass `--calibration-file`). The model name must match the artifact. Scaling is applied to logits (log-probabilities for sklearn), never by dividing probabilities by `T`, and `calibrated_predictions.csv` is written next to the confusion matrix. A calibrated probability is not a validated estimate of prospective experimental success.
-
-### Split conformal prediction
-
-After training, the baseline and GNN commands automatically run conformal evaluation after temperature calibration. The runner expects each model's calibration and test CSVs under `data/MoleculeNet/bace/output/predictions/<ModelName>/`. If the calibration CSV is missing for a GNN (for example, it was trained before calibration-prediction export was added), `app.py conformal --model-type <GNN>` regenerates that file from the matching local checkpoint in `model/<GNN>.pth`, then continues with conformal evaluation. This is checkpoint inference only: it does not retrain or replace the model, and it uses the configured dataset's existing `clean/train_test_split.npz` calibration partition. The checkpoint, source dataset, and split file must exist; if the test prediction CSV is missing, rerun training to recreate the held-out prediction files. Baseline calibration predictions are produced during baseline training and are not reconstructed by this GNN checkpoint recovery path.
-
-For example, to evaluate a previously trained GAT whose calibration CSV is absent:
-
-```bash
-python app.py conformal --model-type GAT
-```
-
-The same command works for GCN, GATGraphTransformer, and `best-baseline` when their corresponding saved prediction files exist. Explicit CSV inputs remain available for custom workflows. The separate calibration split is used to fit the conformal classifier; the test split is only used to report empirical coverage, prediction-set size, and related metrics.
-
-Prediction sets are built with [`crepes`](https://github.com/henrikbostrom/crepes) (`crepes==0.9.1`, in `requirements.txt`): a `ConformalClassifier` is fitted on the calibration nonconformity scores (`1 - P(true class)`, from temperature-scaled probabilities) and queried with smoothing disabled. The reported `nonconformity_threshold` is the finite-sample quantile of those scores.
-
-### Audit and model comparison
-
-```bash
-python app.py audit                    # class semantics, per-split counts, processed-graph counts
-python app.py compare                  # compare existing artifacts on the shared split
-python app.py compare --retrain        # retrain baseline + GCN/GAT/hybrid first, then compare
-```
-
-`compare` checks that every model's validation, calibration, and test labels match the split labels (it fails otherwise), writes `output/comparison/comparison.{csv,json}`, and logs one run to the MLflow experiment `bace-comparison`. `--retrain` accepts `--epochs`, `--hidden-channels`, `--learning-rate`, `--batch-size`, and `--confidence`. The Snakemake workflow runs the equivalent `conformal_*`, `audit`, and `compare` rules.
-
-Run the stage again for an existing model:
-
-```bash
-python app.py conformal --model-type GCN
-python app.py conformal --model-type best-baseline
-```
-
-`--model-type` locates calibration/test prediction CSVs and uses
-`model/<model-type>.calibration.json` when present. For explicit inputs, pass
-both prediction files; a temperature artifact can optionally be supplied with
-`--temperature-file`:
-
-```bash
-python app.py conformal \
-  --calibration-predictions calibration_predictions.csv \
-  --test-predictions test_predictions.csv \
-  --temperature-file model/GCN.calibration.json \
-  --confidence 0.90
-```
-
-The inputs follow the same CSV contract as temperature calibration: a `label`
-column plus `logit_0`/`logit_1` or a class-1 `probability` column. `--groups`
-accepts an optional headerless CSV with one group value per test sample and
-adds coverage and average-set-size summaries by group. Group summaries are
-descriptive; the marginal coverage guarantee relies on calibration and test
-samples being exchangeable and does not correct scaffold distribution shift.
-The report and prediction-set CSV are written to
-`data/MoleculeNet/bace/output/conformal/<ModelName>/` by default.
-
-**Interpreting the results.** The test split holds roughly 150 molecules, so a 10-bin reliability diagram has sparsely populated bins that can shift with one or two molecules. The diagram therefore includes a histogram of samples per bin, and `reliability_table.csv` lists per-bin counts, mean probabilities, and observed fractions for both probability sets. Ten bins is a fixed baseline; the bin count should not be tuned to improve the plot. Read Brier score and NLL alongside ECE, and do not treat a small ECE difference as a meaningful improvement. **Uncertainty.** The report and console include 95% paired percentile-bootstrap intervals (1000 resamples by default) over test molecules for each metric and for the calibrated-minus-uncalibrated difference (`delta`, negative means better for Brier, NLL and ECE). `T` is held fixed, and the same resampled molecules score both probability sets. These intervals capture test-sample noise only: they ignore variance in the fitted `T` and the scaffold-level dependence between molecules, so they are optimistic. If a `delta` interval contains 0, there is no evidence of improvement. Brier score is the binary positive-class version (`mean((p - y)^2)`), half the multiclass sum-over-classes convention.
-
-### 5. Run inference
-
-Inference requires an MLflow model URI. For a baseline model:
-
-```powershell
-python app.py inference `
-  --model-uri "runs:/<run-id>/model" `
-  --model-flavor sklearn `
-  --model-type RandomForestClassifier
-```
-
-For a GNN:
-
-```powershell
-python app.py inference `
-  --model-uri "runs:/<run-id>/GAT-Model" `
-  --model-flavor pytorch `
-  --model-type GAT
-```
-
-Inference loads the held-out test set and writes:
-
-```text
-data/MoleculeNet/bace/output/<model-type>/confusion_matrix.png
-data/MoleculeNet/bace/output/<model-type>/confusion_matrix.txt
-```
-
-The TXT file uses rows for actual classes and columns for predicted classes,
-with class order `0, 1`.
-
-## Run the complete pipeline
-
-Run split creation, fingerprint generation, baseline training, and the selected
-GNN architecture (GCN by default) in order:
-
-```
-python app.py all
-```
-
-Pass `--all-models` to train every supported GNN architecture in the complete
-pipeline. Without it, the legacy single-model behavior is retained. With
-`--all-models`, the run also finishes with the data audit and the cross-model
-comparison (the same `audit` and `compare` steps Snakemake runs), because the
-comparison needs every architecture:
-
-```powershell
-python app.py all --all-models
-```
-
-`python app.py all`, `baseline`, and `gnn` accept `--confidence` (default 0.90)
-for the conformal target, matching `confidence` in `config.yaml`.
-
-The complete workflow can be configured with the same options exposed by the
-individual stages:
-
-```powershell
-python app.py all `
-  --train-size 0.7 `
-  --validation-size 0.1 `
-  --calibration-size 0.1 `
-  --test-size 0.1 `
-  --n-trials 100 `
-  --radius 2 `
-  --n-bits 2048 `
-  --epochs 100 `
-  --model GAT `
-  --hidden-channels 64 `
-  --learning-rate 0.01 `
-  --batch-size 32
-```
-
-The `--model` option selects the GNN architecture for the `all` command:
-
-```powershell
-python app.py all --model GCN
-python app.py all --model GAT
-```
-
-## Test suite
-
-Run the complete unit and workflow test suite with:
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-The suite covers split-file keys, index coverage, class representation,
-scaffold isolation, graph-cache invalidation, fingerprint generation, baseline
-models, GNN model construction and forward passes, inference outputs, MLflow
-utilities, CLI parsing, train/validation model selection behavior, and
-calibration (temperature fitting, input validation, edge cases such as T = 1,
-overconfident logits, invalid probabilities, single-class labels, empty or
-mismatched inputs, invalid JSON, model-identity mismatches, bootstrap intervals,
-artifact round trips, CLI end to end), and conformal prediction thresholds,
-coverage, groups, CLI outputs, missing-GNN-calibration-file recovery, and
-runner dispatch. `pytest` is not required; the suite uses `unittest`.
-
-Other supported architectures include `GCN` and `GATGraphTransformer`.
-
-To inspect the planned workflow without executing it:
-
-```bash
-python app.py all --dry-run
-```
-
-### 7. Run the Snakemake workflow
-
-Preview the execution plan:
+Preview the workflow:
 
 ```bash
 snakemake --cores 1 -n
 ```
 
-Execute the workflow:
+Execute it:
 
 ```bash
 snakemake --cores 1
 ```
 
-The workflow (`config.yaml` drives all parameters, including the conformal `confidence`, default 0.90, and the calibration `calibration_bins`/`calibration_bootstrap`, defaults 10/1000) runs the same stages, with the same arguments and MLflow experiments, as `python app.py all --all-models`; `rule all` requests every final artifact:
+The workflow is configured through `config.yaml` and orchestrates preprocessing, model training, calibration, conformal evaluation, auditing, and model comparison.
 
-| Rule | Purpose | Key outputs |
-|---|---|---|
-| `split`, `fingerprints` | Scaffold split (train/validation/calibration/test) and Morgan fingerprints. | `clean/train_test_split.npz`, `fingerprints/*` |
-| `baselines` | Trains the classical baselines and selects one by validation PR-AUC. | `output/predictions/selected_baseline.json`, baseline prediction CSVs including `calibration_predictions.csv` |
-| `train_gnn` | Trains each GNN in `gnn_models`, selecting checkpoints by validation PR-AUC. | `model/<model>.pth`, validation/calibration/test prediction CSVs |
-| `calibrate_gnn` | Temperature scaling fitted on validation logits, evaluated on test; reruns without retraining. | `model/<model>.calibration.json`, `output/calibration/<model>/*` |
-| `conformal_gnn` | `crepes` conformal sets fitted on the calibration split, reported on test. | `output/conformal/<model>/conformal_report.json` |
-| `calibrate_baseline`, `conformal_baseline` | Same two steps for the selected baseline, via `app.py ... --model-type best-baseline` (its name is only known after training). Tracked with marker files. | `output/calibration/best-baseline.done`, `output/conformal/best-baseline.done` |
-| `audit` | Class semantics, per-split counts, processed-graph counts. | `output/split_audit.json` |
-| `compare` | One comparison on the shared split; fails if any model's labels differ from the split. Logs to MLflow `bace-comparison`. | `output/comparison/comparison.{csv,json}` |
+If Snakemake uses a different Python interpreter from the one containing the project dependencies, configure the interpreter as appropriate for the current environment.
 
-Run a single stage by naming its output, for example `snakemake --cores 1 data/MoleculeNet/bace/output/comparison/comparison.csv`. Snakemake paths are built with `os.path.join`; set `python` in `config.yaml` (or `--config python=...`) to the interpreter that has the project dependencies. Changing a config value such as `epochs` retrains only the stages that depend on it as Snakemake detects changes; use `snakemake --cores 1 --forcerun train_gnn` to force a full retrain of the models. Conformal and comparison reports reflect whichever predictions were present when they were produced, so rerun them after retraining.
+## Probability Calibration
 
-## MLflow experiment tracking
+Temperature scaling adjusts model logits using a single positive scalar \(T\). The fit minimizes validation NLL; the resulting probabilities are evaluated on the held-out test data.
 
-The project uses a local SQLite tracking database by default.
+The current implementation writes calibration artifacts under:
 
-Launch the MLflow interface:
+```text
+model/<ModelName>.calibration.json
+data/MoleculeNet/bace/output/calibration/<ModelName>/
+```
+
+Typical artifacts include:
+
+- Calibration JSON
+- Reliability diagram
+- Per-bin reliability table
+- Machine-readable calibration report
+- Brier score, NLL, and ECE before and after scaling
+- Paired bootstrap intervals for metric changes
+
+Recalibrate an existing GNN without retraining:
+
+```bash
+python app.py calibrate --model-type GCN
+python app.py calibrate --model-type GAT
+python app.py calibrate --model-type GATGraphTransformer
+```
+
+Recalibrate the selected baseline:
+
+```bash
+python app.py calibrate --model-type best-baseline
+```
+
+Use `python app.py calibrate --help` for options such as bin count, bootstrap resamples, seed, and output paths.
+
+### Interpreting calibration metrics
+
+- **Brier score:** Measures squared error between predicted probabilities and binary outcomes.
+- **NLL:** Penalizes incorrect probabilities, especially confident incorrect predictions.
+- **ECE:** Summarizes the difference between confidence and observed frequency across probability bins.
+
+No single metric fully describes calibration. ECE is sensitive to binning, and a small numerical difference should not automatically be interpreted as a meaningful improvement.
+
+Temperature scaling changes probabilities but ordinarily does not change the argmax class prediction or ranking metrics such as ROC-AUC and PR-AUC.
+
+## Split Conformal Prediction
+
+The conformal stage uses a separate calibration partition to estimate a nonconformity threshold and evaluates prediction sets on the test partition.
+
+The nominal target is 90% marginal coverage.
+
+Run conformal evaluation for a previously trained model:
+
+```bash
+python app.py conformal --model-type GCN
+```
+
+Other supported model types include:
+
+```bash
+python app.py conformal --model-type GAT
+python app.py conformal --model-type GATGraphTransformer
+python app.py conformal --model-type best-baseline
+```
+
+The pipeline uses `crepes` for conformal prediction. The current implementation uses nonconformity scores based on \(1 - P(\text{true class})\), with temperature-scaled probabilities where the calibration artifact is applied.
+
+Typical outputs are written under:
+
+```text
+data/MoleculeNet/bace/output/conformal/<ModelName>/
+```
+
+They include:
+
+- `conformal_predictions.csv`
+- `conformal_report.json`
+
+The prediction CSV contains labels, probabilities, predicted classes, prediction sets, and set sizes. The report summarizes coverage and set-size metrics, including class-wise summaries.
+
+### Interpreting prediction sets
+
+- `{0}` means only the non-inhibitor class is included.
+- `{1}` means only the inhibitor class is included.
+- `{0, 1}` means both classes are included.
+
+A singleton set can be incorrect. An ambiguous set can still contain the true class even when the highest-probability class is incorrect.
+
+The nominal 90% target is not a guarantee of 90% coverage for each class or under arbitrary distribution shift. Calibration and test examples must satisfy the relevant exchangeability assumptions for the standard split-conformal marginal coverage guarantee. Scaffold-based generalization may challenge those assumptions.
+
+## Audit and Model Comparison
+
+Run the data audit:
+
+```bash
+python app.py audit
+```
+
+Compare existing model artifacts:
+
+```bash
+python app.py compare
+```
+
+Retrain the baseline and graph models before comparing:
+
+```bash
+python app.py compare --retrain
+```
+
+The comparison writes:
+
+```text
+data/MoleculeNet/bace/output/comparison/comparison.csv
+data/MoleculeNet/bace/output/comparison/comparison.json
+```
+
+It checks that model prediction labels match the labels associated with the expected partitions and logs the comparison to the `bace-comparison` MLflow experiment.
+
+After retraining, rerun calibration, conformal evaluation, and comparison so the reports correspond to the latest prediction artifacts.
+
+## MLflow Experiment Tracking
+
+The project uses MLflow to track experiments, metrics, and artifacts.
+
+Launch the local MLflow interface:
 
 ```bash
 mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
-Open the local URL printed by MLflow to inspect experiments and logged artifacts.
+Open the local URL printed in the terminal.
 
-The default experiments are:
+The default experiments include:
 
 | Experiment | Contents |
 |---|---|
-| `bace-preprocessing` | Scaffold splitting and fingerprint generation. |
-| `bace-baseline` | Classical fingerprint-based classifiers. |
-| `bace-gnn` | GNN training, metrics, and model artifacts. |
-| `bace-calibration` | Temperature-scaling metrics and artifacts. |
-| `bace-conformal` | Prediction-set coverage, size metrics, and artifacts. |
-| `bace-comparison` | One run per comparison: configuration, split counts, per-model metrics (`<model>_<metric>`), the split archive, and comparison tables. |
+| `bace-preprocessing` | Scaffold splitting and fingerprint generation |
+| `bace-baseline` | Classical fingerprint-based models |
+| `bace-gnn` | GNN training, metrics, and model artifacts |
+| `bace-calibration` | Temperature-scaling metrics and artifacts |
+| `bace-conformal` | Prediction-set coverage, sizes, and artifacts |
+| `bace-comparison` | Cross-model metrics, split metadata, and comparison tables |
 
-Tracking settings can be configured using `MLFLOW_TRACKING_URI` or the supported command-line options.
+The tracking URI can be configured using `MLFLOW_TRACKING_URI` or supported command-line options.
+
+Generated model artifacts and the local tracking database are runtime files; do not commit them unless they are deliberately part of a versioned release.
+
+## Testing
+
+Run the unit and workflow test suite:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The repository's tests cover areas including split validation, graph and fingerprint processing, model construction, inference, calibration, conformal prediction, CLI behavior, and workflow integration.
+
+To inspect the planned workflow without executing it, where supported:
+
+```bash
+python app.py all --dry-run
+```
+
+A passing test suite verifies the tested software behavior; it does not, by itself, establish that model comparisons are statistically robust or that the data satisfy all assumptions required for conformal coverage.
 
 ## Limitations
 
-Several limitations should be addressed before treating the current results as a reliable estimate of prospective molecular activity prediction.
+Several limitations should be considered before treating the current results as estimates of prospective molecular activity prediction.
 
-**Validation reuse.** Checkpoints are selected on the validation split (by PR-AUC), which is also used to fit the calibration temperature, so the temperature is not fitted on fully independent data. The test split is used only for final evaluation. The [current results](#current-results) were produced with this protocol; the [historical GNN results](#historical-results-superseded) were not and should not be compared with them.
+**Small dataset.** The benchmark contains 1,513 molecules. Test metrics, probability calibration, and conformal coverage may be sensitive to the composition of the partitions.
 
-**Single run.** The comparison uses one seed, one fixed split, and default GNN hyperparameters (100 epochs, no search). Differences between models are not accompanied by confidence intervals and the GNNs may be under-trained.
+**Single seed and split.** The comparison has not yet been established across multiple independent scaffold splits and random seeds. Small metric differences should not be interpreted as definitive evidence of model superiority.
 
-**Limited dataset size.** With approximately 1,530 molecules, model performance estimates and calibration metrics may be sensitive to the composition of the data partitions.
+**Graph-model optimization.** The current graph architectures have not undergone comprehensive hyperparameter tuning. Training convergence and data-loader shuffling should be checked before the next benchmark.
 
-**Scaffold distribution shift.** Molecules with previously unseen scaffolds may differ substantially from the training compounds. Scaffold-aware evaluation helps investigate this challenge but does not eliminate distribution shift.
+**Validation reuse.** Validation data are used for model or checkpoint selection and for fitting the calibration temperature. Temperature estimation is therefore not fully independent of model selection.
 
-**Probability reliability.** Softmax probabilities are not necessarily calibrated. Temperature scaling is applied after training, but with a small validation split the fitted temperature is itself noisy, and a high predicted probability should not automatically be interpreted as a reliable estimate of activity. Calibration is assessed on a test split of roughly 150 molecules; bootstrap intervals ignore scaffold dependence and the uncertainty in `T`.
+**Chemical distribution shift.** Scaffold-aware evaluation probes generalization to different chemical structures but does not eliminate distribution shift. Calibration and test scaffolds may differ in ways that affect performance and uncertainty.
 
-**Conformal coverage under distribution shift.** Split conformal prediction sets are implemented, but their marginal coverage relies on calibration and test samples being exchangeable. Scaffold-aware splitting deliberately separates scaffold groups, so that assumption may not hold across these partitions; empirical test coverage is descriptive and not a guarantee under arbitrary scaffold shift. Group summaries do not change the fitted threshold.
+**Conformal coverage.** The usual split-conformal marginal coverage guarantee relies on exchangeability between calibration and test observations. Empirical coverage on a scaffold-aware split is descriptive and may not match nominal coverage under scaffold shift.
 
-**Limited interpretability and uncertainty estimation.** The pipeline does not yet provide validated molecular explanations, ensembles, or scaffold-aware uncertainty estimates. Conformal sets provide set-valued predictions but do not establish prospective activity or correct distribution shift.
+**Structure identity.** Zero exact duplicate SMILES does not rule out chemically equivalent structures with different representations. Standardized-structure overlap should be audited across partitions.
 
-**Benchmark scope.** Results on one molecular target do not establish generalization to other targets or prospective drug-discovery settings.
+**Limited interpretability.** Validated atom-level and substructure explanations are not yet part of the reported benchmark.
 
-## Next steps
+**Benchmark scope.** Performance on one target does not establish transfer to other molecular targets or prospective drug discovery. Predicted BACE-1 inhibition does not establish clinical efficacy or safety in Alzheimer's disease.
 
-The next development phase will focus on reliable molecular prediction rather than adding model architectures alone.
+## Next Steps
 
-~~### 1. Correct the experimental protocol~~
+The next phase prioritizes experimental reliability, useful uncertainty estimates, and molecular explanations.
 
-~~Introduce a fixed, scaffold-aware four-way split:~~
+### 1. Strengthen data and split validation
 
-~~| Partition | Target proportion | Purpose |~~
-~~|---|---:|---|
-~~| Training | 70% | Fit model parameters. |~~
-~~| Validation | 10% | Checkpoint/model selection, early stopping, and fitting the temperature (currently). |~~
-~~| Calibration | 10% | Reserved for conformal thresholds (not used by temperature scaling). |~~
-~~| Test | 10% | Final, untouched evaluation. |~~
+- Persist a pairwise scaffold-overlap report for all four partitions.
+- Audit canonicalized and standardized molecular structures across partitions.
+- Preserve stable molecule identifiers and split metadata.
+- Investigate the 17 source-label/pIC50 discrepancies without silently changing the target labels.
 
-~~The target counts are approximate; scaffold grouping and class balance may affect the actual partition sizes.~~
+### 2. Improve the benchmark
 
-~~The implementation should:~~
+- Verify that training batches are reshuffled correctly between epochs.
+- Check graph-model convergence and validation learning curves.
+- Repeat experiments across multiple random seeds and scaffold splits.
+- Perform targeted hyperparameter optimization.
+- Report uncertainty intervals for comparative model performance.
+- Keep model selection separate from final test evaluation.
 
-~~- Keep test-set metrics out of checkpoint selection (done).~~
-~~- Use validation data for early stopping and model selection.~~
-~~- Keep calibration data separate from model fitting and selection.~~
-~~- Evaluate the frozen pipeline on the test set only after the modeling and calibration decisions are finalized.~~
-~~- Save partition assignments and audit scaffold overlap, class distributions, and sample counts.~~
+### 3. Expand uncertainty quantification
 
-~~### 2. Probability calibration~~
+Investigate whether uncertainty indicators help identify unreliable predictions. Candidate methods include:
 
-~~**Status: implemented** (see [Probability calibration](#probability-calibration)). Temperature scaling is fitted on validation logits and evaluated on the test split with Brier score, NLL, ECE, reliability diagrams (with per-bin counts) and paired bootstrap intervals. Still planned: an independent temperature-fitting set (for example cross-fitting) and scaffold-aware uncertainty intervals; the current bootstrap intervals are optimistic (see above).~~
+- Deep ensembles and model disagreement.
+- Predictive entropy.
+- Maximum Tanimoto similarity to training molecules.
+- Scaffold novelty indicators.
+- Error analysis stratified by molecular similarity and novelty.
+- Coverage and set-size analysis across chemical subgroups.
 
-~~### 3. Conformal prediction~~
+The objective is to assess whether uncertainty measures are empirically associated with prediction errors rather than assuming that every uncertainty score is informative.
 
-~~**Status: implemented.** The pipeline fits split-conformal thresholds on the held-out calibration predictions and evaluates test prediction sets (see [Split conformal prediction]~~(#split-conformal-prediction)). Further work should investigate calibration strategies and coverage under scaffold distribution shift.~~
+### 4. Add molecular explainability
 
-~~Current reports include:~~
+Investigate graph explanation methods such as GNNExplainer and atom-level attribution to highlight influential atoms, bonds, and substructures.
 
-~~- Empirical coverage~~
-~~- Average prediction-set size~~
-~~- Singleton prediction rate~~
-~~- Coverage by activity class~~
-~~- Coverage across scaffold novelty or molecular similarity groups~~
+Explanations should be assessed for fidelity and stability across model seeds. Highlighted substructures should not automatically be interpreted as causal determinants of biological activity.
 
-~~The nominal coverage target does not guarantee the same coverage under arbitrary distribution shift. This is particularly important when evaluating previously unseen molecular scaffolds.~~
+### 5. Evaluate generalization
 
-### 4. Uncertainty quantification
+Assess whether the Morgan baseline's observed advantage persists with better-optimized graph models, multiple scaffold splits, and additional molecular activity datasets.
 
-Investigate deep ensembles and molecular novelty indicators.
+This will help determine whether the findings reflect the current configuration or a more general pattern across molecular prediction tasks.
 
-Potential additions include:
+## Project Direction
 
-- Ensemble predictive entropy
-- Model disagreement
-- Maximum Tanimoto similarity to training molecules
-- Scaffold novelty indicators
-- Error analysis as a function of uncertainty
+The long-term goal is to build a reproducible molecular machine learning workflow that combines:
 
-The objective is to assess whether uncertainty measures help identify unreliable predictions, rather than assuming that every uncertainty score is informative.
-
-### 5. Explainable AI for molecular graphs
-
-Investigate molecular explanation methods such as GNNExplainer and atom-level attribution.
-
-The planned outputs include molecular visualizations highlighting influential atoms, bonds, and subgraphs.
-
-Explanations should be evaluated for fidelity and stability across model seeds. Highlighted substructures should not automatically be interpreted as causal determinants of biological activity.
-
-### 6. Comparative evaluation
-
-A first single-split, single-seed comparison is complete (see [Current results](#current-results)); the Morgan baseline outperformed GCN, GAT, and the hybrid model. What remains is to establish whether that holds with multiple seeds, longer GNN training or tuning, and additional scaffold splits, with confidence intervals.
-
-### 7. Generalization to other molecular targets
-
-A follow-up experiment on an additional molecular activity dataset could help determine whether the resulting evaluation, calibration, and uncertainty framework transfers beyond BACE-1.
-
-## Project direction
-
-The long-term goal is to develop a reproducible molecular machine learning pipeline that combines:
-
-- Molecular graph learning
-- Classical machine learning baselines
-- Scaffold-aware evaluation
-- Probability calibration
-- Conformal prediction
-- Predictive uncertainty estimation
-- Molecular explainability
-- Experiment tracking and workflow automation
+- Classical molecular machine learning baselines.
+- Graph neural networks and molecular representation learning.
+- Scaffold-aware evaluation.
+- Probability calibration.
+- Conformal prediction.
+- Predictive uncertainty estimation.
+- Molecular explainability.
+- Experiment tracking and workflow automation.
 
 The central research question is whether a molecular model can provide not only useful activity predictions, but also meaningful information about when those predictions are reliable and which structural features contribute to them.
 
 ## Disclaimer
 
-This project is a research and educational implementation for molecular activity classification. Predictions are computational estimates and do not establish experimental inhibitory activity, clinical efficacy, or suitability as a therapeutic candidate.
+This project is for research and educational purposes. Model predictions are computational estimates and do not establish experimental inhibitory activity, clinical efficacy, or suitability as a therapeutic candidate.
