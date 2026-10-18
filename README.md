@@ -787,7 +787,8 @@ Several limitations should be considered before treating the current results as 
 ## Next Steps
 
 The next phase prioritizes experimental reliability, useful uncertainty estimates, and molecular explanations.
-
+<strike>
+```
 ### 1. Strengthen data and split validation
 
 - Persist a pairwise scaffold-overlap report for all four partitions.
@@ -816,6 +817,8 @@ Investigate whether uncertainty indicators help identify unreliable predictions.
 - Coverage and set-size analysis across chemical subgroups.
 
 The objective is to assess whether uncertainty measures are empirically associated with prediction errors rather than assuming that every uncertainty score is informative.
+```
+</strike>
 
 ### 4. Add molecular explainability
 
