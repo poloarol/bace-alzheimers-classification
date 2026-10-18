@@ -45,7 +45,7 @@ The workflow compares conventional molecular fingerprints with learned graph rep
 
 Explore the project's methodology, model comparisons, probability calibration, and conformal prediction results in the accompanying presentation.
 
-**[View the project presentation (PowerPoint)]([https://docs.google.com/presentation/d/1drB5MubWnGnHKsfPZF--sIvAH_Bp1OaUSenGJC2klSM/edit?usp=sharing])**
+[**View the project presentation (PowerPoint)**](https://docs.google.com/presentation/d/1drB5MubWnGnHKsfPZF--sIvAH_Bp1OaUSenGJC2klSM/edit?usp=sharing)
 
 The presentation covers the BACE-1 classification task, molecular representations, GNN architectures, benchmark results, uncertainty quantification, and key findings.
 
