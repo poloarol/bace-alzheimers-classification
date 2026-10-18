@@ -12,6 +12,7 @@ The project combines molecular representations, scaffold-aware evaluation, proba
 
 - [Project Overview](#project-overview)
 - [Objectives](#objectives)
+- [Presentation](#presentation)
 - [Dataset](#dataset)
 - [Methods](#methods)
 - [Current Results](#current-results)
@@ -39,6 +40,16 @@ This project uses molecular structures to predict a binary activity label:
 - **Class 1:** BACE-1 inhibitor.
 
 The workflow compares conventional molecular fingerprints with learned graph representations. It then evaluates classification performance, probability calibration, and conformal prediction sets on held-out molecules.
+
+## Presentation
+
+Explore the project's methodology, model comparisons, probability calibration, and conformal prediction results in the accompanying presentation.
+
+**[View the project presentation (PowerPoint)]([https://docs.google.com/presentation/d/1drB5MubWnGnHKsfPZF--sIvAH_Bp1OaUSenGJC2klSM/edit?usp=sharing])**
+
+The presentation covers the BACE-1 classification task, molecular representations, GNN architectures, benchmark results, uncertainty quantification, and key findings.
+
+NB: I am still updating it, as I explore the results and understand the results but also explore other areas of interests.
 
 ### Key features
 
