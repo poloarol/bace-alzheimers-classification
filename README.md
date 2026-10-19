@@ -862,4 +862,4 @@ The central research question is whether a molecular model can provide not only 
 
 This project is for research and educational purposes. Model predictions are computational estimates and do not establish experimental inhibitory activity, clinical efficacy, or suitability as a therapeutic candidate.
 
-**Copilot** and **ChatGPT** were used for architectural purposes, and understanding concepts and interpreting results respectively.
+ChatGPT and GitHub Copilot were used as supporting tools during development to assist with code exploration, debugging, documentation, and refinement of the analysis workflow. Model selection, experimental design, evaluation of results, and interpretation of findings remained subject to review and validation against the project's implementation and outputs.
